@@ -1,5 +1,7 @@
+import asyncio
 import json
 import logging
+import time
 from typing import Dict, Any, Optional
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, HTTPException, Query
 from pydantic import BaseModel
@@ -107,7 +109,6 @@ async def websocket_endpoint(websocket: WebSocket, room_id: str, player_id: str)
             room.players[player_id]["last_heartbeat"] = time.time()
             room.players[player_id]["disconnected_at"] = None
 
-    import asyncio
     queue = asyncio.Queue()
     room.add_listener(queue)
 
