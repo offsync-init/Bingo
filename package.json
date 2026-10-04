@@ -1,0 +1,11 @@
+{
+  "name": "nepali-bingo-1v1",
+  "version": "1.0.0",
+  "description": "Real-Time 1v1 Nepali Bingo Web Game",
+  "scripts": {
+    "backend": "./start-backend.sh",
+    "frontend": "./start-frontend.sh",
+    "test": "PYTHONPATH=backend backend/venv/bin/pytest backend/tests/ -v",
+    "build": "npm --prefix frontend run build"
+  }
+}
