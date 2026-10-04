@@ -35,7 +35,14 @@ export function useBingoSocket({
   const getWsUrl = useCallback(() => {
     if (typeof window === "undefined") return "";
     const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
-    const host = process.env.NEXT_PUBLIC_WS_HOST || window.location.hostname + ":8000";
+    let host = process.env.NEXT_PUBLIC_WS_HOST;
+    if (!host) {
+      if (window.location.hostname === "localhost" || window.location.hostname === "127.0.0.1") {
+        host = window.location.hostname + ":8000";
+      } else {
+        host = "bingo-backend-e686.onrender.com";
+      }
+    }
     return `${protocol}//${host}/api/ws/${roomId.toUpperCase()}/${playerId}`;
   }, [roomId, playerId]);
 

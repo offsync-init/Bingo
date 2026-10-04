@@ -35,7 +35,7 @@ export default function CreateRoomPage() {
       const name = playerName.trim() || (lang === "ne" ? "खेलाडी १" : "Player 1");
       setStoredPlayerName(name);
 
-      const apiUrl = process.env.NEXT_PUBLIC_API_URL || "";
+      const apiUrl = process.env.NEXT_PUBLIC_API_URL || "https://bingo-backend-e686.onrender.com";
       const res = await fetch(`${apiUrl}/api/rooms`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
