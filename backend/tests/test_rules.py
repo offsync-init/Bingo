@@ -228,3 +228,51 @@ async def test_rematch_flow():
     assert room.result is None
     assert len(room.called_numbers) == 0
     assert room.preparation_deadline is not None
+
+
+@pytest.mark.asyncio
+async def test_disconnect_forfeit_grace_period():
+    service = RoomService()
+    p1 = "user_1"
+    p2 = "user_2"
+    room = await service.create_room(p1, "Player 1")
+    await service.join_room(room.room_id, p2, "Player 2")
+    await service.set_player_ready(room, p1, True)
+    await service.set_player_ready(room, p2, True)
+
+    assert room.status == "PLAYING"
+
+    # Player 2 disconnects
+    await service.mark_player_disconnected(room, p2)
+    assert room.players[p2]["connected"] is False
+    assert room.players[p2]["disconnected_at"] is not None
+
+    # Simulate 30s expiration
+    async with room.lock:
+        await service._handle_disconnect_forfeit_unlocked(room, p2)
+
+    assert room.status == "FINISHED"
+    assert room.winner == p1
+    assert room.result == "PLAYER1_WIN"
+    assert room.result_reason == "DISCONNECT_FORFEIT"
+
+
+@pytest.mark.asyncio
+async def test_swap_cells_and_validation():
+    service = RoomService()
+    p1 = "user_1"
+    room = await service.create_room(p1, "Player 1")
+    
+    val_0_0 = room.boards[p1][0][0]
+    val_1_1 = room.boards[p1][1][1]
+
+    # Valid swap
+    ok, err = await service.swap_cells(room, p1, 0, 0, 1, 1)
+    assert ok is True
+    assert room.boards[p1][0][0] == val_1_1
+    assert room.boards[p1][1][1] == val_0_0
+
+    # Invalid coordinates
+    ok, err = await service.swap_cells(room, p1, 0, 0, 5, 5)
+    assert ok is False
+    assert "out of bounds" in err

@@ -129,3 +129,30 @@ async def test_full_game_lifecycle_end_to_end():
         assert room.winner is None
         assert len(room.called_numbers) == 0
         assert room.preparation_deadline is not None
+
+
+@pytest.mark.asyncio
+async def test_websocket_malformed_and_edge_inputs():
+    """
+    Verifies that malformed, unexpected, or crashing inputs do not crash the service.
+    """
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        p1 = "user_robust_1"
+        res = await client.post("/api/rooms", json={"player_id": p1, "player_name": "Test1"})
+        room_id = res.json()["room_id"]
+
+        room = await room_service.get_or_load_room(room_id)
+        assert room is not None
+
+        # Verify invalid move handling directly
+        ok, err = await room_service.call_number(room, p1, 999)
+        assert ok is False
+        assert "Game is not active" in err
+
+        # Verify negative numbers or 0
+        ok, err = await room_service.call_number(room, p1, 0)
+        assert ok is False
+
+        # Verify board swap out of range
+        ok, err = await room_service.swap_cells(room, p1, -1, 0, 0, 0)
+        assert ok is False

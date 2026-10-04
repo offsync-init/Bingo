@@ -145,48 +145,55 @@ async def websocket_endpoint(websocket: WebSocket, room_id: str, player_id: str)
             action = payload.get("action")
             data = payload.get("data", {})
 
-            if action == "PING":
-                await websocket.send_text(json.dumps({"type": "PONG"}))
+            try:
+                if action == "PING":
+                    await websocket.send_text(json.dumps({"type": "PONG"}))
 
-            elif action == "READY":
-                ready_val = bool(data.get("ready", True))
-                await room_service.set_player_ready(room, player_id, ready_val)
+                elif action == "READY":
+                    ready_val = bool(data.get("ready", True))
+                    await room_service.set_player_ready(room, player_id, ready_val)
 
-            elif action == "RANDOMIZE_BOARD":
-                await room_service.randomize_board(room, player_id)
+                elif action == "RANDOMIZE_BOARD":
+                    await room_service.randomize_board(room, player_id)
 
-            elif action == "SWAP_CELLS":
-                r1 = int(data.get("row1", 0))
-                c1 = int(data.get("col1", 0))
-                r2 = int(data.get("row2", 0))
-                c2 = int(data.get("col2", 0))
-                ok, err = await room_service.swap_cells(room, player_id, r1, c1, r2, c2)
-                if not ok:
-                    await ws_manager.send_to_player(room_id, player_id, {
-                        "type": "ERROR",
-                        "data": {"message": err}
-                    })
+                elif action == "SWAP_CELLS":
+                    r1 = int(data.get("row1", 0))
+                    c1 = int(data.get("col1", 0))
+                    r2 = int(data.get("row2", 0))
+                    c2 = int(data.get("col2", 0))
+                    ok, err = await room_service.swap_cells(room, player_id, r1, c1, r2, c2)
+                    if not ok:
+                        await ws_manager.send_to_player(room_id, player_id, {
+                            "type": "ERROR",
+                            "data": {"message": err}
+                        })
 
-            elif action == "SET_BOARD":
-                grid = data.get("board", [])
-                ok, err = await room_service.set_entire_board(room, player_id, grid)
-                if not ok:
-                    await ws_manager.send_to_player(room_id, player_id, {
-                        "type": "ERROR",
-                        "data": {"message": err}
-                    })
+                elif action == "SET_BOARD":
+                    grid = data.get("board", [])
+                    ok, err = await room_service.set_entire_board(room, player_id, grid)
+                    if not ok:
+                        await ws_manager.send_to_player(room_id, player_id, {
+                            "type": "ERROR",
+                            "data": {"message": err}
+                        })
 
-            elif action == "CALL_NUMBER":
-                num = int(data.get("number", 0))
-                ok, err = await room_service.call_number(room, player_id, num)
-                if not ok:
-                    await ws_manager.send_to_player(room_id, player_id, {
-                        "type": "ERROR",
-                        "data": {"message": err}
-                    })
+                elif action == "CALL_NUMBER":
+                    num = int(data.get("number", 0))
+                    ok, err = await room_service.call_number(room, player_id, num)
+                    if not ok:
+                        await ws_manager.send_to_player(room_id, player_id, {
+                            "type": "ERROR",
+                            "data": {"message": err}
+                        })
 
-            elif action == "REQUEST_REMATCH":
-                await room_service.request_rematch(room, player_id)
+                elif action == "REQUEST_REMATCH":
+                    await room_service.request_rematch(room, player_id)
+
+            except (ValueError, TypeError) as err:
+                await ws_manager.send_to_player(room_id, player_id, {
+                    "type": "ERROR",
+                    "data": {"message": f"Invalid data payload: {err}"}
+                })
 
     except WebSocketDisconnect:
         logger.info(f"WebSocket disconnected: {player_id} from {room_id}")
@@ -194,7 +201,10 @@ async def websocket_endpoint(websocket: WebSocket, room_id: str, player_id: str)
         logger.error(f"WebSocket error for {player_id}: {e}")
     finally:
         forward_task.cancel()
+        try:
+            await forward_task
+        except (asyncio.CancelledError, Exception):
+            pass
         room.remove_listener(queue)
         ws_manager.disconnect(room_id, player_id)
         await room_service.mark_player_disconnected(room, player_id)
-        await ws_manager.broadcast_state(room, "PLAYER_DISCONNECTED", {"player_id": player_id})

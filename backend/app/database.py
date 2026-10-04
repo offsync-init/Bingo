@@ -5,7 +5,12 @@ from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, Asyn
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 from sqlalchemy import String, Text, DateTime
 
-DATABASE_URL = "sqlite+aiosqlite:///./bingo.db"
+import os
+DATABASE_URL = os.getenv("DATABASE_URL", "sqlite+aiosqlite:///./bingo.db")
+if DATABASE_URL.startswith("postgres://"):
+    DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql+asyncpg://", 1)
+elif DATABASE_URL.startswith("postgresql://"):
+    DATABASE_URL = DATABASE_URL.replace("postgresql://", "postgresql+asyncpg://", 1)
 
 engine = create_async_engine(DATABASE_URL, echo=False)
 async_session = async_sessionmaker(engine, expire_on_commit=False)
@@ -53,30 +58,33 @@ async def ensure_db():
 
 
 async def save_room_state(room_dict: Dict[str, Any]):
-    await ensure_db()
-    async with async_session() as session:
-        async with session.begin():
-            record = await session.get(RoomRecord, room_dict["room_id"])
-            if not record:
-                record = RoomRecord(room_id=room_dict["room_id"])
-                session.add(record)
+    try:
+        await ensure_db()
+        async with async_session() as session:
+            async with session.begin():
+                record = await session.get(RoomRecord, room_dict["room_id"])
+                if not record:
+                    record = RoomRecord(room_id=room_dict["room_id"])
+                    session.add(record)
 
-            record.status = room_dict["status"]
-            record.creator_id = room_dict["creator_id"]
-            record.player_data = json.dumps(room_dict.get("players", {}))
-            record.player_order = json.dumps(room_dict.get("player_order", []))
-            record.boards_data = json.dumps(room_dict.get("boards", {}))
-            record.called_numbers_data = json.dumps(room_dict.get("called_numbers", []))
-            record.current_turn = room_dict.get("current_turn")
-            record.preparation_deadline = room_dict.get("preparation_deadline")
-            record.turn_started_at = room_dict.get("turn_started_at")
-            record.turn_deadline = room_dict.get("turn_deadline")
-            record.match_deadline = room_dict.get("match_deadline")
-            record.winner = room_dict.get("winner")
-            record.result = room_dict.get("result")
-            record.result_reason = room_dict.get("result_reason")
-            record.updated_at = datetime.now(timezone.utc)
-            await session.commit()
+                record.status = room_dict["status"]
+                record.creator_id = room_dict["creator_id"]
+                record.player_data = json.dumps(room_dict.get("players", {}))
+                record.player_order = json.dumps(room_dict.get("player_order", []))
+                record.boards_data = json.dumps(room_dict.get("boards", {}))
+                record.called_numbers_data = json.dumps(room_dict.get("called_numbers", []))
+                record.current_turn = room_dict.get("current_turn")
+                record.preparation_deadline = room_dict.get("preparation_deadline")
+                record.turn_started_at = room_dict.get("turn_started_at")
+                record.turn_deadline = room_dict.get("turn_deadline")
+                record.match_deadline = room_dict.get("match_deadline")
+                record.winner = room_dict.get("winner")
+                record.result = room_dict.get("result")
+                record.result_reason = room_dict.get("result_reason")
+                record.updated_at = datetime.now(timezone.utc)
+    except Exception as e:
+        import logging
+        logging.getLogger("bingo.db").error(f"Failed to save room state for {room_dict.get('room_id')}: {e}")
 
 
 async def load_room_state(room_id: str) -> Optional[Dict[str, Any]]:
