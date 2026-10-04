@@ -6,6 +6,7 @@ import { Volume2, VolumeX, Globe, Copy, Check } from "lucide-react";
 import { DhakaBorder, NepalSunMoonIcon } from "./DhakaPattern";
 import { soundFX } from "../lib/audio";
 import { Language, translations } from "../lib/translations";
+import { copyToClipboard } from "../lib/utils";
 
 interface HeaderProps {
   lang: Language;
@@ -29,11 +30,13 @@ export const Header: React.FC<HeaderProps> = ({
   const [copied, setCopied] = React.useState(false);
   const t = translations[lang];
 
-  const handleCopyCode = () => {
+  const handleCopyCode = async () => {
     if (!roomCode) return;
-    navigator.clipboard.writeText(roomCode);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 2000);
+    const ok = await copyToClipboard(roomCode);
+    if (ok) {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    }
   };
 
   return (

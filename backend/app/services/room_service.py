@@ -30,15 +30,20 @@ class GameRoom:
     def __init__(self, room_id: str, creator_id: str, creator_name: str):
         self.room_id = room_id
         self.creator_id = creator_id
+        self.leader_id = creator_id
         self.status = "WAITING"  # WAITING, PREPARING, PLAYING, FINISHED
         self.players: Dict[str, Dict[str, Any]] = {
             creator_id: {
                 "id": creator_id,
                 "name": creator_name,
-                "connected": True,
+                "connected": False,  # Verified upon WebSocket handshake
                 "ready": False,
                 "rematch_requested": False,
                 "disconnected_at": None,
+                "is_leader": True,
+                "connection_state": "DISCONNECTED",
+                "last_heartbeat": time.time(),
+                "session_id": None,
             }
         }
         self.player_order: List[str] = [creator_id]
@@ -77,6 +82,7 @@ class GameRoom:
             "room_id": self.room_id,
             "status": self.status,
             "creator_id": self.creator_id,
+            "leader_id": self.leader_id,
             "players": self.players,
             "player_order": self.player_order,
             "boards": self.boards,
@@ -113,10 +119,25 @@ class GameRoom:
             for pid in self.player_order if pid in self.boards
         }
 
+        # Real verified opponent connection
+        opponent_player = self.players.get(opponent_id) if opponent_id else None
+        peer_connected = bool(opponent_player and opponent_player.get("connected", False))
+        peer_connection_state = opponent_player.get("connection_state", "DISCONNECTED") if opponent_player else "DISCONNECTED"
+        both_connected = bool(
+            len(self.player_order) >= 2 and
+            all(self.players[pid].get("connected", False) for pid in self.player_order if pid in self.players)
+        )
+
+        # Synchronize is_leader on each player record
+        for pid, pdata in self.players.items():
+            pdata["is_leader"] = (pid == self.leader_id)
+
         return {
             "room_id": self.room_id,
             "status": self.status,
             "creator_id": self.creator_id,
+            "leader_id": self.leader_id,
+            "is_leader": player_id == self.leader_id,
             "players": self.players,
             "player_order": self.player_order,
             "current_turn": self.current_turn,
@@ -134,6 +155,9 @@ class GameRoom:
             "player_lines": completed_lines_count,
             "opponent_id": opponent_id,
             "opponent_lines": opponent_lines,
+            "peer_connected": peer_connected,
+            "peer_connection_state": peer_connection_state,
+            "both_connected": both_connected,
             "completed_line_details": completed_line_details,
         }
 
@@ -154,9 +178,25 @@ class RoomService:
                 now = time.time()
                 for room in list(self.rooms.values()):
                     async with room.lock:
+                        # Check heartbeat timeout (15s tolerance)
+                        for pid, pdata in room.players.items():
+                            if pdata.get("connected"):
+                                last_hb = pdata.get("last_heartbeat", now)
+                                if now - last_hb >= 15.0:
+                                    pdata["connected"] = False
+                                    pdata["connection_state"] = "DISCONNECTED"
+                                    pdata["disconnected_at"] = now
+                                    await save_room_state(room.to_dict())
+                                    await room.notify_listeners("PLAYER_DISCONNECTED", {
+                                        "player_id": pid,
+                                        "grace_period_sec": DISCONNECT_GRACE_SEC
+                                    })
+
                         if room.status == "PREPARING":
                             if room.preparation_deadline and now >= room.preparation_deadline:
-                                await self._start_game_unlocked(room)
+                                # Only auto-start if both players are actually connected!
+                                if len(room.players) == 2 and all(p.get("connected") for p in room.players.values()):
+                                    await self._start_game_unlocked(room)
                         elif room.status == "PLAYING":
                             # Check match deadline first
                             if room.match_deadline and now >= room.match_deadline:
@@ -196,6 +236,7 @@ class RoomService:
 
         # Reconstruct GameRoom
         room = GameRoom(data["room_id"], data["creator_id"], "")
+        room.leader_id = data.get("leader_id", data["creator_id"])
         room.status = data["status"]
         room.players = data["players"]
         room.player_order = data["player_order"]
@@ -212,7 +253,7 @@ class RoomService:
         self.rooms[room_id] = room
         return room
 
-    async def join_room(self, room_id: str, player_id: str, player_name: str) -> Tuple[bool, Optional[str], Optional[GameRoom]]:
+    async def join_room(self, room_id: str, player_id: str, player_name: str, session_id: Optional[str] = None) -> Tuple[bool, Optional[str], Optional[GameRoom]]:
         room = await self.get_or_load_room(room_id)
         if not room:
             return False, "Room not found", None
@@ -221,7 +262,11 @@ class RoomService:
             # Check if this player is already in the room (reconnecting / returning)
             if player_id in room.players:
                 room.players[player_id]["connected"] = True
+                room.players[player_id]["connection_state"] = "CONNECTED"
                 room.players[player_id]["disconnected_at"] = None
+                room.players[player_id]["last_heartbeat"] = time.time()
+                if session_id:
+                    room.players[player_id]["session_id"] = session_id
                 if player_name:
                     room.players[player_id]["name"] = player_name
                 await save_room_state(room.to_dict())
@@ -236,13 +281,19 @@ class RoomService:
             room.players[player_id] = {
                 "id": player_id,
                 "name": player_name or "Player 2",
-                "connected": True,
+                "connected": False,  # Will be marked True on WebSocket handshake
                 "ready": False,
                 "rematch_requested": False,
                 "disconnected_at": None,
+                "is_leader": False,
+                "connection_state": "DISCONNECTED",
+                "last_heartbeat": time.time(),
+                "session_id": session_id,
             }
-            room.player_order.append(player_id)
-            room.boards[player_id] = generate_board()
+            if player_id not in room.player_order:
+                room.player_order.append(player_id)
+            if player_id not in room.boards:
+                room.boards[player_id] = generate_board()
 
             # When 2nd player joins, transition to PREPARING phase with 60s timer
             room.status = "PREPARING"
@@ -269,10 +320,87 @@ class RoomService:
                 "players": room.players
             })
 
-            # Check if both players are ready to start immediately before 60s expires
+            # Check if both players are ready to start
             if len(room.players) == 2 and all(p.get("ready") for p in room.players.values()):
                 if room.status == "PREPARING":
                     await self._start_game_unlocked(room)
+
+    async def start_game_by_leader(self, room: GameRoom, requester_id: str) -> Tuple[bool, Optional[str]]:
+        async with room.lock:
+            if requester_id != room.leader_id:
+                return False, "Only the room leader can start the game"
+            if len(room.players) < 2:
+                return False, "Cannot start match without 2 players"
+            if room.status == "PLAYING":
+                return True, None
+            # Authoritative connection check: both players must be actively connected
+            for pid in room.player_order:
+                p = room.players.get(pid)
+                if not p or not p.get("connected"):
+                    return False, "Both players must be actively connected to start the match"
+            await self._start_game_unlocked(room)
+            return True, None
+
+    async def kick_player(self, room: GameRoom, requester_id: str, target_player_id: str) -> Tuple[bool, Optional[str]]:
+        async with room.lock:
+            if requester_id != room.leader_id:
+                return False, "Only the room leader can kick players"
+            if target_player_id == room.leader_id:
+                return False, "Room leader cannot kick themselves"
+            if target_player_id not in room.players:
+                return False, "Player not found in room"
+
+            # Remove target player
+            del room.players[target_player_id]
+            if target_player_id in room.player_order:
+                room.player_order.remove(target_player_id)
+            if target_player_id in room.boards:
+                del room.boards[target_player_id]
+
+            # Reset room to WAITING so a new player can join
+            room.status = "WAITING"
+            room.preparation_deadline = None
+            room.turn_deadline = None
+            room.match_deadline = None
+            room.called_numbers = []
+            room.winner = None
+            room.result = None
+            room.result_reason = None
+            room.current_turn = None
+
+            # Reset readiness of remaining players
+            for p in room.players.values():
+                p["ready"] = False
+                p["rematch_requested"] = False
+
+            await save_room_state(room.to_dict())
+            await room.notify_listeners("PLAYER_KICKED", {
+                "kicked_player_id": target_player_id,
+                "leader_id": room.leader_id,
+                "room": room.to_dict(),
+            })
+            return True, None
+
+    async def transfer_leader_if_needed(self, room: GameRoom, departing_player_id: str) -> Optional[str]:
+        async with room.lock:
+            if departing_player_id != room.leader_id:
+                return None
+            candidates = [pid for pid in room.player_order if pid != departing_player_id and pid in room.players]
+            if candidates:
+                new_leader_id = candidates[0]
+                room.leader_id = new_leader_id
+                if new_leader_id in room.players:
+                    room.players[new_leader_id]["is_leader"] = True
+                if departing_player_id in room.players:
+                    room.players[departing_player_id]["is_leader"] = False
+                await save_room_state(room.to_dict())
+                await room.notify_listeners("LEADER_TRANSFERRED", {
+                    "old_leader_id": departing_player_id,
+                    "new_leader_id": new_leader_id,
+                    "room": room.to_dict()
+                })
+                return new_leader_id
+            return None
 
     async def randomize_board(self, room: GameRoom, player_id: str) -> Optional[List[List[int]]]:
         async with room.lock:

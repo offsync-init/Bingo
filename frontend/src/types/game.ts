@@ -15,6 +15,15 @@ export interface LineDetail {
   numbers: number[];
 }
 
+export type ConnectionState =
+  | "DISCONNECTED"
+  | "CONNECTING"
+  | "SIGNALING"
+  | "NEGOTIATING"
+  | "CONNECTED"
+  | "RECONNECTING"
+  | "FAILED";
+
 export interface PlayerInfo {
   id: string;
   name: string;
@@ -22,12 +31,17 @@ export interface PlayerInfo {
   ready: boolean;
   rematch_requested: boolean;
   disconnected_at: number | null;
+  is_leader?: boolean;
+  connection_state?: ConnectionState;
+  last_heartbeat?: number;
 }
 
 export interface GameState {
   room_id: string;
   status: RoomStatus;
   creator_id: string;
+  leader_id: string;
+  is_leader: boolean;
   players: Record<string, PlayerInfo>;
   player_order: string[];
   current_turn: string | null;
@@ -45,6 +59,9 @@ export interface GameState {
   player_lines: number;
   opponent_id: string | null;
   opponent_lines: number;
+  peer_connected: boolean;
+  peer_connection_state: ConnectionState;
+  both_connected: boolean;
   completed_line_details: LineDetail[];
 }
 

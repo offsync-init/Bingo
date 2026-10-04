@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState, useCallback } from "react";
-import { GameState, WebSocketMessage } from "../types/game";
+import { GameState, WebSocketMessage, ConnectionState } from "../types/game";
 import { soundFX } from "../lib/audio";
 
 interface UseBingoSocketOptions {
@@ -11,6 +11,7 @@ interface UseBingoSocketOptions {
   onNumberCalled?: (num: number, calledBy: string) => void;
   onLineCompleted?: (count: number) => void;
   onGameOver?: (result: string, winner: string | null) => void;
+  onKicked?: (reason?: string) => void;
 }
 
 export function useBingoSocket({
@@ -20,15 +21,23 @@ export function useBingoSocket({
   onNumberCalled,
   onLineCompleted,
   onGameOver,
+  onKicked,
 }: UseBingoSocketOptions) {
   const [gameState, setGameState] = useState<GameState | null>(null);
-  const [isConnected, setIsConnected] = useState<boolean>(false);
+  const [connectionState, setConnectionState] = useState<ConnectionState>("CONNECTING");
+  const [latency, setLatency] = useState<number | null>(null);
+  const [isKicked, setIsKicked] = useState<boolean>(false);
+  const [kickedReason, setKickedReason] = useState<string>("");
   const [error, setError] = useState<string | null>(null);
   const [lastCalled, setLastCalled] = useState<{ number: number; by: string } | null>(null);
 
   const socketRef = useRef<WebSocket | null>(null);
   const pingIntervalRef = useRef<NodeJS.Timeout | null>(null);
+  const missedPongsRef = useRef<number>(0);
+  const pingTimestampRef = useRef<number>(0);
   const reconnectTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const reconnectAttemptsRef = useRef<number>(0);
+  const isManuallyClosedRef = useRef<boolean>(false);
   const prevLinesRef = useRef<number>(0);
   const prevTurnRef = useRef<string | null>(null);
 
@@ -43,31 +52,72 @@ export function useBingoSocket({
         host = "bingo-backend-e686.onrender.com";
       }
     }
-    return `${protocol}//${host}/api/ws/${roomId.toUpperCase()}/${playerId}`;
-  }, [roomId, playerId]);
+    const cleanRoom = roomId.toUpperCase().trim();
+    const query = playerName ? `?player_name=${encodeURIComponent(playerName)}` : "";
+    return `${protocol}//${host}/api/ws/${cleanRoom}/${playerId}${query}`;
+  }, [roomId, playerId, playerName]);
+
+  const sendAction = useCallback((action: string, data: any = {}) => {
+    if (socketRef.current && socketRef.current.readyState === WebSocket.OPEN) {
+      socketRef.current.send(JSON.stringify({ action, data }));
+      return true;
+    }
+    return false;
+  }, []);
 
   const connect = useCallback(() => {
-    if (!roomId || !playerId) return;
+    if (!roomId || !playerId || isKicked) return;
 
-    if (socketRef.current && (socketRef.current.readyState === WebSocket.OPEN || socketRef.current.readyState === WebSocket.CONNECTING)) {
+    if (
+      socketRef.current &&
+      (socketRef.current.readyState === WebSocket.OPEN ||
+        socketRef.current.readyState === WebSocket.CONNECTING)
+    ) {
       return;
     }
 
     try {
+      setConnectionState((prev) => (reconnectAttemptsRef.current > 0 ? "RECONNECTING" : "CONNECTING"));
       const url = getWsUrl();
       const ws = new WebSocket(url);
       socketRef.current = ws;
 
       ws.onopen = () => {
-        setIsConnected(true);
+        setConnectionState("SIGNALING");
         setError(null);
-        // Start ping interval
+        reconnectAttemptsRef.current = 0;
+        missedPongsRef.current = 0;
+
+        // Perform explicit application-level HANDSHAKE
+        setConnectionState("NEGOTIATING");
+        ws.send(
+          JSON.stringify({
+            action: "HANDSHAKE",
+            data: {
+              player_id: playerId,
+              player_name: playerName || "Player",
+              room_id: roomId.toUpperCase(),
+              session_id: `${playerId}_${Date.now()}`,
+            },
+          })
+        );
+
+        // Start frequent ping-pong heartbeat (every 5 seconds)
         if (pingIntervalRef.current) clearInterval(pingIntervalRef.current);
         pingIntervalRef.current = setInterval(() => {
           if (ws.readyState === WebSocket.OPEN) {
+            missedPongsRef.current += 1;
+            if (missedPongsRef.current >= 3) {
+              // Missed 3 pongs (15s) - connection likely broken, trigger reconnect
+              console.warn("Heartbeat missed 3 pongs, closing websocket to reconnect...");
+              setConnectionState("RECONNECTING");
+              ws.close(4000, "Heartbeat timeout");
+              return;
+            }
+            pingTimestampRef.current = performance.now();
             ws.send(JSON.stringify({ action: "PING" }));
           }
-        }, 15000);
+        }, 5000);
       };
 
       ws.onmessage = (event) => {
@@ -77,6 +127,32 @@ export function useBingoSocket({
           const data = msg.data;
 
           if (type === "PONG") {
+            missedPongsRef.current = 0;
+            if (pingTimestampRef.current > 0) {
+              const rtt = Math.round(performance.now() - pingTimestampRef.current);
+              setLatency(rtt);
+            }
+            return;
+          }
+
+          if (type === "HANDSHAKE_ACK") {
+            setConnectionState("CONNECTED");
+            if (data?.game_state) {
+              setGameState(data.game_state);
+            }
+            return;
+          }
+
+          if (type === "KICKED") {
+            setIsKicked(true);
+            const reason = data?.reason || "You were removed from the room by the room leader.";
+            setKickedReason(reason);
+            setConnectionState("FAILED");
+            setError(reason);
+            onKicked?.(reason);
+            if (socketRef.current) {
+              socketRef.current.close(4008, "Kicked");
+            }
             return;
           }
 
@@ -85,18 +161,22 @@ export function useBingoSocket({
             return;
           }
 
-          // Handle authoritative game state update
+          // Authoritative game state update
           if (data?.game_state) {
             const nextState: GameState = data.game_state;
             setGameState(nextState);
 
-            // Check if player's turn just started
-            if (nextState.current_turn === playerId && prevTurnRef.current !== playerId && nextState.status === "PLAYING") {
+            // Turn sound notification
+            if (
+              nextState.current_turn === playerId &&
+              prevTurnRef.current !== playerId &&
+              nextState.status === "PLAYING"
+            ) {
               soundFX.playTurnAlert();
             }
             prevTurnRef.current = nextState.current_turn;
 
-            // Check if player completed a line
+            // Line completion sound notification
             const currentLines = nextState.player_lines || 0;
             if (currentLines > prevLinesRef.current) {
               soundFX.playLineComplete();
@@ -129,47 +209,60 @@ export function useBingoSocket({
       };
 
       ws.onclose = (event) => {
-        setIsConnected(false);
         if (pingIntervalRef.current) clearInterval(pingIntervalRef.current);
 
-        // Auto-reconnect after 2 seconds if not intentionally closed
-        if (event.code !== 1000 && event.code !== 4003 && event.code !== 4004) {
-          reconnectTimeoutRef.current = setTimeout(() => {
-            connect();
-          }, 2000);
-        } else if (event.code === 4003) {
-          setError("Room is full (maximum 2 players).");
-        } else if (event.code === 4004) {
-          setError("Room does not exist.");
+        if (event.code === 4008 || isKicked) {
+          setConnectionState("FAILED");
+          return;
         }
+
+        if (isManuallyClosedRef.current || event.code === 1000) {
+          setConnectionState("DISCONNECTED");
+          return;
+        }
+
+        if (event.code === 4003) {
+          setConnectionState("FAILED");
+          setError("Room is full (maximum 2 players).");
+          return;
+        }
+
+        if (event.code === 4004) {
+          setConnectionState("FAILED");
+          setError("Room does not exist.");
+          return;
+        }
+
+        // Connection dropped unexpectedly; initiate auto-reconnect
+        setConnectionState("RECONNECTING");
+        reconnectAttemptsRef.current += 1;
+        const delay = Math.min(1000 * Math.pow(1.5, reconnectAttemptsRef.current), 10000);
+        reconnectTimeoutRef.current = setTimeout(() => {
+          connect();
+        }, delay);
       };
 
       ws.onerror = () => {
-        setIsConnected(false);
+        setConnectionState((prev) => (prev === "CONNECTED" ? "RECONNECTING" : "FAILED"));
       };
     } catch (e) {
-      console.error("WebSocket connection failed:", e);
+      console.error("WebSocket connection initiation failed:", e);
+      setConnectionState("FAILED");
     }
-  }, [roomId, playerId, getWsUrl, onNumberCalled, onLineCompleted, onGameOver]);
+  }, [roomId, playerId, playerName, isKicked, getWsUrl, onNumberCalled, onLineCompleted, onGameOver, onKicked]);
 
   useEffect(() => {
+    isManuallyClosedRef.current = false;
     connect();
     return () => {
+      isManuallyClosedRef.current = true;
       if (pingIntervalRef.current) clearInterval(pingIntervalRef.current);
       if (reconnectTimeoutRef.current) clearTimeout(reconnectTimeoutRef.current);
       if (socketRef.current) {
-        socketRef.current.close(1000);
+        socketRef.current.close(1000, "Component unmounted");
       }
     };
   }, [connect]);
-
-  const sendAction = useCallback((action: string, data: any = {}) => {
-    if (socketRef.current && socketRef.current.readyState === WebSocket.OPEN) {
-      socketRef.current.send(JSON.stringify({ action, data }));
-      return true;
-    }
-    return false;
-  }, []);
 
   const callNumber = useCallback((number: number) => {
     return sendAction("CALL_NUMBER", { number });
@@ -195,17 +288,45 @@ export function useBingoSocket({
     return sendAction("REQUEST_REMATCH");
   }, [sendAction]);
 
+  const startGame = useCallback(() => {
+    return sendAction("START_GAME");
+  }, [sendAction]);
+
+  const kickPlayer = useCallback((targetPlayerId: string) => {
+    return sendAction("KICK_PLAYER", { target_player_id: targetPlayerId });
+  }, [sendAction]);
+
+  const isConnected = connectionState === "CONNECTED";
+  const isLeader = Boolean(
+    gameState?.is_leader ||
+    (gameState?.leader_id && gameState?.leader_id === playerId) ||
+    (gameState?.creator_id && gameState?.creator_id === playerId)
+  );
+  const peerConnected = Boolean(gameState?.peer_connected);
+  const bothConnected = Boolean(gameState?.both_connected);
+
   return {
     gameState,
     isConnected,
+    connectionState,
+    latency,
+    isKicked,
+    kickedReason,
     error,
     lastCalled,
+    isLeader,
+    peerConnected,
+    bothConnected,
     callNumber,
     setReady,
     randomizeBoard,
     swapCells,
     setEntireBoard,
     requestRematch,
+    startGame,
+    kickPlayer,
+    reconnect: connect,
     clearError: () => setError(null),
   };
 }
+

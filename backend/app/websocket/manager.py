@@ -50,5 +50,18 @@ class ConnectionManager:
             }
             await self.send_to_player(room_id, player_id, payload)
 
+    async def kick_and_close(self, room_id: str, player_id: str, reason: str = "You were removed from the room by the room leader."):
+        if room_id in self.active_connections and player_id in self.active_connections[room_id]:
+            ws = self.active_connections[room_id][player_id]
+            try:
+                await ws.send_text(json.dumps({
+                    "type": "KICKED",
+                    "data": {"message": reason}
+                }))
+                await ws.close(code=4005, reason=reason)
+            except Exception as e:
+                logger.warning(f"Error kicking player {player_id}: {e}")
+            self.disconnect(room_id, player_id)
+
 
 ws_manager = ConnectionManager()

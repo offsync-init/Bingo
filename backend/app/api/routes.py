@@ -24,12 +24,14 @@ class JoinRoomRequest(BaseModel):
 async def create_room(req: CreateRoomRequest):
     if not req.player_id.strip():
         raise HTTPException(status_code=400, detail="player_id is required")
+
     name = req.player_name.strip() or "Player 1"
     room = await room_service.create_room(req.player_id, name)
     return {
         "room_id": room.room_id,
         "player_id": req.player_id,
         "player_name": name,
+        "leader_id": room.leader_id,
         "status": room.status,
     }
 
@@ -44,6 +46,7 @@ async def get_room(room_id: str):
     return {
         "room_id": room.room_id,
         "status": room.status,
+        "leader_id": room.leader_id,
         "player_count": player_count,
         "is_full": player_count >= 2,
     }
@@ -63,13 +66,15 @@ async def join_room(room_id: str, req: JoinRoomRequest):
     # Broadcast updated room state to connected players
     await ws_manager.broadcast_state(room, "PLAYER_JOINED", {
         "joined_player": req.player_id,
-        "joined_name": name
+        "joined_name": name,
+        "leader_id": room.leader_id
     })
 
     return {
         "room_id": room.room_id,
         "player_id": req.player_id,
         "player_name": name,
+        "leader_id": room.leader_id,
         "status": room.status,
     }
 
@@ -82,21 +87,26 @@ async def websocket_endpoint(websocket: WebSocket, room_id: str, player_id: str)
         await websocket.close(code=4004, reason="Room not found")
         return
 
-    # Check authorization: player must be part of room or joining
+    # Check authorization / capacity: allow existing or auto-join as player 2
     if player_id not in room.players:
         if len(room.players) >= 2:
             await websocket.close(code=4003, reason="Room is full")
             return
+        success, err, room = await room_service.join_room(room_id, player_id, "Player 2")
+        if not success or not room:
+            await websocket.close(code=4003, reason=err or "Room is full")
+            return
 
     await ws_manager.connect(room_id, player_id, websocket)
 
-    # Mark player connected
+    # Mark player connected & verified in room
     async with room.lock:
         if player_id in room.players:
             room.players[player_id]["connected"] = True
+            room.players[player_id]["connection_state"] = "CONNECTED"
+            room.players[player_id]["last_heartbeat"] = time.time()
             room.players[player_id]["disconnected_at"] = None
 
-    # Listen to room internal events via queue
     import asyncio
     queue = asyncio.Queue()
     room.add_listener(queue)
@@ -126,8 +136,20 @@ async def websocket_endpoint(websocket: WebSocket, room_id: str, player_id: str)
     # Send initial state immediately upon connection to this player
     init_state = room.get_player_view(player_id)
     await ws_manager.send_to_player(room_id, player_id, {
-        "type": "CONNECTED",
-        "data": {"game_state": init_state}
+        "type": "HANDSHAKE_ACK",
+        "data": {
+            "session_id": player_id,
+            "player_id": player_id,
+            "leader_id": room.leader_id,
+            "is_leader": player_id == room.leader_id,
+            "game_state": init_state
+        }
+    })
+
+    # Notify all room listeners that this player has actively connected
+    await room.notify_listeners("PLAYER_CONNECTED", {
+        "player_id": player_id,
+        "leader_id": room.leader_id
     })
 
     try:
@@ -147,7 +169,52 @@ async def websocket_endpoint(websocket: WebSocket, room_id: str, player_id: str)
 
             try:
                 if action == "PING":
-                    await websocket.send_text(json.dumps({"type": "PONG"}))
+                    if player_id in room.players:
+                        room.players[player_id]["last_heartbeat"] = time.time()
+                    await websocket.send_text(json.dumps({
+                        "type": "PONG",
+                        "data": {
+                            "client_timestamp": data.get("timestamp"),
+                            "server_timestamp": time.time()
+                        }
+                    }))
+
+                elif action == "HANDSHAKE":
+                    pname = data.get("player_name")
+                    sid = data.get("session_id")
+                    if pname and player_id in room.players:
+                        room.players[player_id]["name"] = pname
+                    if sid and player_id in room.players:
+                        room.players[player_id]["session_id"] = sid
+                    room.players[player_id]["last_heartbeat"] = time.time()
+                    await ws_manager.send_to_player(room_id, player_id, {
+                        "type": "HANDSHAKE_ACK",
+                        "data": {
+                            "player_id": player_id,
+                            "leader_id": room.leader_id,
+                            "is_leader": player_id == room.leader_id,
+                            "game_state": room.get_player_view(player_id)
+                        }
+                    })
+
+                elif action == "START_GAME":
+                    ok, err = await room_service.start_game_by_leader(room, player_id)
+                    if not ok:
+                        await ws_manager.send_to_player(room_id, player_id, {
+                            "type": "ERROR",
+                            "data": {"message": err}
+                        })
+
+                elif action == "KICK_PLAYER":
+                    target_pid = data.get("target_player_id")
+                    ok, err = await room_service.kick_player(room, player_id, target_pid)
+                    if not ok:
+                        await ws_manager.send_to_player(room_id, player_id, {
+                            "type": "ERROR",
+                            "data": {"message": err}
+                        })
+                    else:
+                        await ws_manager.kick_and_close(room_id, target_pid, "You were removed from the room by the room leader.")
 
                 elif action == "READY":
                     ready_val = bool(data.get("ready", True))
@@ -208,3 +275,4 @@ async def websocket_endpoint(websocket: WebSocket, room_id: str, player_id: str)
         room.remove_listener(queue)
         ws_manager.disconnect(room_id, player_id)
         await room_service.mark_player_disconnected(room, player_id)
+        await room_service.transfer_leader_if_needed(room, player_id)

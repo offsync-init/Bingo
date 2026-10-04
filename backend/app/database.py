@@ -26,6 +26,7 @@ class RoomRecord(Base):
     room_id: Mapped[str] = mapped_column(String(32), primary_key=True, index=True)
     status: Mapped[str] = mapped_column(String(32), default="WAITING")
     creator_id: Mapped[str] = mapped_column(String(64))
+    leader_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
     player_data: Mapped[str] = mapped_column(Text, default="{}")  # JSON encoded players dict
     player_order: Mapped[str] = mapped_column(Text, default="[]")  # JSON encoded [p1_id, p2_id]
     boards_data: Mapped[str] = mapped_column(Text, default="{}")  # JSON encoded boards dict
@@ -39,8 +40,7 @@ class RoomRecord(Base):
     result: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
     result_reason: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc))
-    updated_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
-
+from sqlalchemy import String, Text, DateTime, text
 
 _db_initialized = False
 
@@ -48,6 +48,10 @@ async def init_db():
     global _db_initialized
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+        try:
+            await conn.execute(text("ALTER TABLE rooms ADD COLUMN leader_id VARCHAR(64)"))
+        except Exception:
+            pass
     _db_initialized = True
 
 
@@ -69,6 +73,7 @@ async def save_room_state(room_dict: Dict[str, Any]):
 
                 record.status = room_dict["status"]
                 record.creator_id = room_dict["creator_id"]
+                record.leader_id = room_dict.get("leader_id", room_dict["creator_id"])
                 record.player_data = json.dumps(room_dict.get("players", {}))
                 record.player_order = json.dumps(room_dict.get("player_order", []))
                 record.boards_data = json.dumps(room_dict.get("boards", {}))
@@ -96,6 +101,7 @@ async def load_room_state(room_id: str) -> Optional[Dict[str, Any]]:
             "room_id": record.room_id,
             "status": record.status,
             "creator_id": record.creator_id,
+            "leader_id": record.leader_id or record.creator_id,
             "players": json.loads(record.player_data or "{}"),
             "player_order": json.loads(record.player_order or "[]"),
             "boards": json.loads(record.boards_data or "{}"),

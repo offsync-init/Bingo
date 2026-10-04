@@ -276,3 +276,87 @@ async def test_swap_cells_and_validation():
     ok, err = await service.swap_cells(room, p1, 0, 0, 5, 5)
     assert ok is False
     assert "out of bounds" in err
+
+
+@pytest.mark.asyncio
+async def test_room_leader_authority_and_kick():
+    service = RoomService()
+    p1 = "leader_1"
+    p2 = "player_2"
+    room = await service.create_room(p1, "Leader Ram")
+    assert room.leader_id == p1
+    assert room.players[p1]["is_leader"] is True
+
+    await service.join_room(room.room_id, p2, "Guest Sita")
+    assert room.status == "PREPARING"
+    assert room.leader_id == p1
+    assert room.players[p2]["is_leader"] is False
+
+    # Non-leader tries to kick leader -> rejected
+    ok, err = await service.kick_player(room, p2, p1)
+    assert ok is False
+    assert "Only the room leader" in err
+
+    # Leader tries to kick self -> rejected
+    ok, err = await service.kick_player(room, p1, p1)
+    assert ok is False
+    assert "cannot kick themselves" in err
+
+    # Leader kicks player 2 -> success!
+    ok, err = await service.kick_player(room, p1, p2)
+    assert ok is True
+    assert p2 not in room.players
+    assert p2 not in room.player_order
+    assert p2 not in room.boards
+    assert room.status == "WAITING"
+    assert room.preparation_deadline is None
+
+    # New player 3 can now join
+    p3 = "player_3"
+    ok, err, r = await service.join_room(room.room_id, p3, "New Guest Hari")
+    assert ok is True
+    assert room.status == "PREPARING"
+    assert len(room.players) == 2
+
+
+@pytest.mark.asyncio
+async def test_leader_transfer_when_leader_leaves():
+    service = RoomService()
+    p1 = "leader_1"
+    p2 = "player_2"
+    room = await service.create_room(p1, "Leader Ram")
+    await service.join_room(room.room_id, p2, "Guest Sita")
+    assert room.leader_id == p1
+
+    # Leader leaves -> leadership transfers to player 2
+    new_leader = await service.transfer_leader_if_needed(room, p1)
+    assert new_leader == p2
+    assert room.leader_id == p2
+    assert room.players[p2]["is_leader"] is True
+
+
+@pytest.mark.asyncio
+async def test_start_game_by_leader_validation():
+    service = RoomService()
+    p1 = "leader_1"
+    p2 = "player_2"
+    room = await service.create_room(p1, "Leader Ram")
+    await service.join_room(room.room_id, p2, "Guest Sita")
+
+    # Non-leader tries to start -> rejected
+    ok, err = await service.start_game_by_leader(room, p2)
+    assert ok is False
+    assert "Only the room leader" in err
+
+    # Leader tries to start while players not connected -> rejected
+    ok, err = await service.start_game_by_leader(room, p1)
+    assert ok is False
+    assert "Both players must be actively connected" in err
+
+    # Mark both connected -> start succeeds!
+    room.players[p1]["connected"] = True
+    room.players[p2]["connected"] = True
+    ok, err = await service.start_game_by_leader(room, p1)
+    assert ok is True
+    assert room.status == "PLAYING"
+    assert room.current_turn == p1
