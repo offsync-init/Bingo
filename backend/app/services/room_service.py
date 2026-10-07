@@ -73,6 +73,7 @@ def make_player_record(
         "rematch_requested": False,
         "disconnected_at": None,
         "is_leader": is_leader,
+        "is_forfeited": False,
     }
 
 
@@ -724,6 +725,9 @@ class RoomService:
         now = time.time()
         if not room.game_session_id:
             room.game_session_id = str(uuid.uuid4())
+        for pdata in room.players.values():
+            pdata["is_forfeited"] = False
+
         room.status = "STARTING"
         await room.notify_listeners("GAME_STARTING", {
             "game_session_id": room.game_session_id,
@@ -753,6 +757,9 @@ class RoomService:
 
             board = room.boards.get(player_id, [])
             called_set = set(room.called_numbers)
+
+            if room.players.get(player_id, {}).get("is_forfeited"):
+                return False, "You have forfeited this game"
 
             valid, err = validate_move(
                 player_id=player_id,
@@ -831,6 +838,44 @@ class RoomService:
             })
             return True, None
 
+    async def forfeit_game(self, room: GameRoom, player_id: str) -> Tuple[bool, Optional[str]]:
+        async with room.lock:
+            pdata = room.players.get(player_id)
+            if not pdata:
+                return False, "Player is not in this room"
+            if pdata.get("is_forfeited"):
+                return False, "Already forfeited"
+            if room.status != "PLAYING":
+                return False, "Game is not active"
+
+            pdata["is_forfeited"] = True
+
+            if len(room.player_order) < 2:
+                return False, "Cannot forfeit without an opponent"
+
+            p1_id = room.player_order[0]
+            p2_id = room.player_order[1]
+            winner_id = p2_id if player_id == p1_id else p1_id
+
+            room.status = "FINISHED"
+            room.winner = winner_id
+            room.result = "PLAYER1_WIN" if winner_id == p1_id else "PLAYER2_WIN"
+            room.result_reason = "PLAYER_FORFEIT"
+
+            slog("player_forfeited", room_id=room.room_id, player_id=player_id, winner_id=winner_id)
+            await save_room_state(room.to_dict())
+            await room.notify_listeners("PLAYER_FORFEITED", {
+                "player_id": player_id,
+                "room_id": room.room_id,
+            })
+            await room.notify_listeners("GAME_FINISHED", {
+                "winner": winner_id,
+                "forfeit_player": player_id,
+                "result": room.result,
+                "result_reason": room.result_reason,
+            })
+            return True, None
+
     async def _handle_turn_timeout_unlocked(self, room: GameRoom):
         """Turn timeout: current player loses, opponent wins immediately."""
         timed_out_player = room.current_turn
@@ -885,6 +930,11 @@ class RoomService:
 
     async def _handle_disconnect_forfeit_unlocked(self, room: GameRoom, disconnected_pid: str):
         """30s grace period expired: forfeit to connected opponent."""
+        if room.status != "PLAYING":
+            return
+        pdata = room.players.get(disconnected_pid)
+        if pdata and pdata.get("is_forfeited"):
+            return
         p1_id = room.player_order[0]
         p2_id = room.player_order[1]
         winner_id = p2_id if disconnected_pid == p1_id else p1_id
@@ -955,6 +1005,7 @@ class RoomService:
                     room.boards[pid] = generate_board()
                     room.players[pid]["ready"] = False
                     room.players[pid]["rematch_requested"] = False
+                    room.players[pid]["is_forfeited"] = False
 
                 room.called_numbers = []
                 room.status = "PREPARING"
