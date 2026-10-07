@@ -2,21 +2,25 @@
 
 import React, { useEffect } from "react";
 import confetti from "canvas-confetti";
-import { Trophy, Frown, Equal, RefreshCw, Home, Sparkles } from "lucide-react";
+import { Trophy, Frown, Equal, RefreshCw, Home, Eye } from "lucide-react";
 import { Language, translations } from "../lib/translations";
 import { toDevanagari } from "../lib/utils";
-import { DhakaBorder, NepaliMandalaBadge } from "./DhakaPattern";
+import { DhakaBorder } from "./DhakaPattern";
 
 interface GameModalProps {
   isOpen: boolean;
   result: "PLAYER1_WIN" | "PLAYER2_WIN" | "DRAW" | null;
-  resultReason: "BINGO" | "TURN_TIMEOUT" | "MATCH_TIMEOUT" | "DISCONNECT_FORFEIT" | null;
+  resultReason: "BINGO" | "TURN_TIMEOUT" | "MATCH_TIMEOUT" | "DISCONNECT_FORFEIT" | "PLAYER_FORFEIT" | null;
   isWinner: boolean;
   isDraw: boolean;
   myLines: number;
   opponentLines: number;
+  myName?: string;
+  opponentName?: string;
+  winnerName?: string;
   rematchRequested: boolean;
   onRequestRematch: () => void;
+  onInspectGame?: () => void;
   onExit: () => void;
   lang: Language;
   devanagariNumerals: boolean;
@@ -30,8 +34,12 @@ export const GameModal: React.FC<GameModalProps> = ({
   isDraw,
   myLines,
   opponentLines,
+  myName,
+  opponentName,
+  winnerName,
   rematchRequested,
   onRequestRematch,
+  onInspectGame,
   onExit,
   lang,
   devanagariNumerals,
@@ -57,7 +65,7 @@ export const GameModal: React.FC<GameModalProps> = ({
 
   const formatNum = (n: number) => (devanagariNumerals ? toDevanagari(n) : n);
 
-  let title = t.youWin;
+  let title = winnerName ? (lang === "ne" ? `${winnerName} विजयी!` : `${winnerName} Won!`) : t.youWin;
   let subtitle = t.reasonBingo;
   let icon = <Trophy className="w-14 h-14 text-amber-400 animate-bounce" />;
   let headerBg = "from-amber-500/20 via-rose-600/20 to-amber-600/20 border-amber-500/50";
@@ -68,7 +76,7 @@ export const GameModal: React.FC<GameModalProps> = ({
     icon = <Equal className="w-14 h-14 text-slate-300" />;
     headerBg = "from-slate-700/20 to-slate-800/20 border-slate-600";
   } else if (!isWinner) {
-    title = t.youLose;
+    title = winnerName ? (lang === "ne" ? `${winnerName} विजयी!` : `${winnerName} Won!`) : t.youLose;
     icon = <Frown className="w-14 h-14 text-rose-400" />;
     headerBg = "from-rose-950/40 to-slate-900 border-rose-500/40";
 
@@ -78,6 +86,8 @@ export const GameModal: React.FC<GameModalProps> = ({
       subtitle = t.reasonMatchTimeout;
     } else if (resultReason === "DISCONNECT_FORFEIT") {
       subtitle = t.reasonDisconnect;
+    } else if (resultReason === "PLAYER_FORFEIT") {
+      subtitle = t.reasonPlayerForfeitLoss;
     } else {
       subtitle = t.reasonBingo;
     }
@@ -89,8 +99,13 @@ export const GameModal: React.FC<GameModalProps> = ({
       subtitle = t.reasonMatchTimeout;
     } else if (resultReason === "DISCONNECT_FORFEIT") {
       subtitle = t.reasonDisconnect;
+    } else if (resultReason === "PLAYER_FORFEIT") {
+      subtitle = t.reasonPlayerForfeitWin;
     }
   }
+
+  const displayName = myName || t.yourName;
+  const displayOpponentName = opponentName || t.opponentStatus;
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/85 backdrop-blur-md animate-in fade-in duration-300">
@@ -113,8 +128,8 @@ export const GameModal: React.FC<GameModalProps> = ({
         <div className="p-6 bg-slate-950/60">
           <div className="grid grid-cols-2 gap-3 mb-6">
             <div className="p-3 bg-slate-900/90 rounded-xl border border-slate-800">
-              <span className="text-[11px] text-slate-400 block font-semibold">
-                {t.yourName}
+              <span className="text-[11px] text-slate-400 block font-semibold truncate">
+                {displayName}
               </span>
               <span className="text-2xl font-black text-amber-400">
                 {formatNum(myLines)}
@@ -125,8 +140,8 @@ export const GameModal: React.FC<GameModalProps> = ({
             </div>
 
             <div className="p-3 bg-slate-900/90 rounded-xl border border-slate-800">
-              <span className="text-[11px] text-slate-400 block font-semibold">
-                {t.opponentStatus}
+              <span className="text-[11px] text-slate-400 block font-semibold truncate">
+                {displayOpponentName}
               </span>
               <span className="text-2xl font-black text-slate-300">
                 {formatNum(opponentLines)}
@@ -139,6 +154,17 @@ export const GameModal: React.FC<GameModalProps> = ({
 
           {/* Action Buttons */}
           <div className="flex flex-col gap-3">
+            {onInspectGame && (
+              <button
+                type="button"
+                onClick={onInspectGame}
+                className="w-full py-2.5 px-4 rounded-xl bg-slate-800 hover:bg-slate-700 text-amber-300 border border-amber-500/40 font-bold text-xs sm:text-sm tracking-wide shadow-md transition-all flex items-center justify-center gap-2 active:scale-95"
+              >
+                <Eye className="w-4 h-4 text-amber-400" />
+                <span>{lang === "ne" ? "खेल निरीक्षण गर्नुहोस् (INSPECT GAME)" : "INSPECT GAME"}</span>
+              </button>
+            )}
+
             <button
               type="button"
               onClick={onRequestRematch}

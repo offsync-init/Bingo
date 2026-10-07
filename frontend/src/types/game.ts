@@ -32,8 +32,70 @@ export interface PlayerInfo {
   rematch_requested: boolean;
   disconnected_at: number | null;
   is_leader?: boolean;
+  is_forfeited?: boolean;
   connection_state?: ConnectionState;
   last_heartbeat?: number;
+}
+
+export interface ChatMessage {
+  id: string;
+  room_id: string;
+  sender_id: string;
+  sender_name: string;
+  message: string;
+  timestamp: number;
+}
+
+export interface GameEvent {
+  sequence_number: number;
+  event_type: string;
+  player_id?: string | null;
+  player_name?: string | null;
+  timestamp: number;
+  payload: Record<string, any>;
+  snapshot: {
+    status: string;
+    called_numbers: number[];
+    current_turn: string | null;
+    boards: Record<
+      string,
+      {
+        player_id: string;
+        player_name: string;
+        grid: number[][];
+        marked_board: CellData[][];
+        completed_lines: number;
+        completed_line_details: LineDetail[];
+      }
+    >;
+  };
+}
+
+export interface InspectionData {
+  room_id: string;
+  status: string;
+  winner_id: string | null;
+  winner_name: string | null;
+  result: string | null;
+  result_reason: string | null;
+  duration_sec: number;
+  total_moves: number;
+  winning_move: number | null;
+  winning_lines: LineDetail[];
+  events: GameEvent[];
+  player_boards: Record<
+    string,
+    {
+      player_id: string;
+      player_name: string;
+      is_leader: boolean;
+      is_forfeited: boolean;
+      grid: number[][];
+      marked_board: CellData[][];
+      completed_lines_count: number;
+      completed_line_details: LineDetail[];
+    }
+  >;
 }
 
 export interface GameState {
@@ -54,7 +116,7 @@ export interface GameState {
   completed_lines: Record<string, number>;
   winner: string | null;
   result: "PLAYER1_WIN" | "PLAYER2_WIN" | "DRAW" | null;
-  result_reason: "BINGO" | "TURN_TIMEOUT" | "MATCH_TIMEOUT" | "DISCONNECT_FORFEIT" | null;
+  result_reason: "BINGO" | "TURN_TIMEOUT" | "MATCH_TIMEOUT" | "DISCONNECT_FORFEIT" | "PLAYER_FORFEIT" | null;
   board: CellData[][] | null;
   player_id: string;
   player_lines: number;
@@ -64,6 +126,8 @@ export interface GameState {
   peer_connection_state: ConnectionState;
   both_connected: boolean;
   completed_line_details: LineDetail[];
+  chat_messages?: ChatMessage[];
+  inspection_data?: InspectionData | null;
   connection_diagnostics?: {
     room_id: string;
     player_id: string;

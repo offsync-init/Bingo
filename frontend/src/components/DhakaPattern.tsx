@@ -11,7 +11,7 @@ export const DhakaBorder: React.FC<DhakaBorderProps> = ({
 }) => {
   if (variant === "vertical") {
     return (
-      <div className={`w-3 flex flex-col overflow-hidden select-none opacity-85 ${className}`}>
+      <div className={`theme-ornament w-3 flex flex-col overflow-hidden select-none opacity-85 ${className}`}>
         <svg
           className="w-full h-full"
           preserveAspectRatio="repeat"
@@ -37,7 +37,7 @@ export const DhakaBorder: React.FC<DhakaBorderProps> = ({
   }
 
   return (
-    <div className={`h-3 w-full overflow-hidden select-none opacity-90 shadow-sm ${className}`}>
+    <div className={`theme-ornament h-3 w-full overflow-hidden select-none opacity-90 shadow-sm ${className}`}>
       <svg
         className="w-full h-full"
         preserveAspectRatio="repeat"
@@ -78,7 +78,7 @@ export const NepaliMandalaBadge: React.FC<{ size?: number; className?: string }>
       width={size}
       height={size}
       viewBox="0 0 100 100"
-      className={`animate-spin-slow ${className}`}
+      className={`theme-ornament animate-spin-slow ${className}`}
       fill="none"
       xmlns="http://www.w3.org/2000/svg"
     >

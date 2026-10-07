@@ -129,6 +129,10 @@ class GameRoom:
         self._listeners: Set[Any] = set()
         self._peer_round: int = 0
 
+        self.events: List[Dict[str, Any]] = []
+        self._event_seq: int = 0
+        self.chat_messages: List[Dict[str, Any]] = []
+
     def add_listener(self, queue: asyncio.Queue):
         self._listeners.add(queue)
 
@@ -141,6 +145,90 @@ class GameRoom:
                 await q.put({"type": event_type, "data": data})
             except Exception:
                 pass
+
+    def record_event(self, event_type: str, player_id: Optional[str] = None, payload: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        self._event_seq += 1
+        now = time.time()
+        pname = self.players.get(player_id, {}).get("name") if player_id else None
+
+        board_snapshots = {}
+        for pid in self.player_order:
+            b = self.boards.get(pid)
+            if b:
+                called_set = set(self.called_numbers)
+                board_snapshots[pid] = {
+                    "player_id": pid,
+                    "player_name": self.players.get(pid, {}).get("name", pid),
+                    "grid": [row[:] for row in b],
+                    "marked_board": format_board_with_marks(b, called_set),
+                    "completed_lines": count_completed_lines(b, called_set),
+                    "completed_line_details": get_completed_lines(b, called_set),
+                }
+
+        ev = {
+            "sequence_number": self._event_seq,
+            "event_type": event_type,
+            "player_id": player_id,
+            "player_name": pname,
+            "timestamp": now,
+            "payload": payload or {},
+            "snapshot": {
+                "status": self.status,
+                "called_numbers": list(self.called_numbers),
+                "current_turn": self.current_turn,
+                "boards": board_snapshots,
+            },
+        }
+        self.events.append(ev)
+        return ev
+
+    def get_inspection_data(self) -> Optional[Dict[str, Any]]:
+        if not self.events:
+            return None
+
+        first_ts = self.events[0]["timestamp"] if self.events else time.time()
+        last_ts = self.events[-1]["timestamp"] if self.events else time.time()
+        duration = max(0.0, round(last_ts - first_ts, 1))
+
+        winner_pdata = self.players.get(self.winner) if self.winner else None
+        winner_name = winner_pdata.get("name") if winner_pdata else None
+
+        winning_move = self.called_numbers[-1] if (self.called_numbers and self.result_reason == "BINGO") else None
+        winning_lines = []
+        if self.winner and self.boards.get(self.winner):
+            winning_lines = get_completed_lines(self.boards[self.winner], set(self.called_numbers))
+
+        player_boards = {}
+        for pid in self.player_order:
+            if pid in self.boards:
+                pinfo = self.players.get(pid, {})
+                called_set = set(self.called_numbers)
+                b = self.boards[pid]
+                player_boards[pid] = {
+                    "player_id": pid,
+                    "player_name": pinfo.get("name", pid),
+                    "is_leader": pinfo.get("is_leader", False),
+                    "is_forfeited": pinfo.get("is_forfeited", False),
+                    "grid": b,
+                    "marked_board": format_board_with_marks(b, called_set),
+                    "completed_lines_count": count_completed_lines(b, called_set),
+                    "completed_line_details": get_completed_lines(b, called_set),
+                }
+
+        return {
+            "room_id": self.room_id,
+            "status": self.status,
+            "winner_id": self.winner,
+            "winner_name": winner_name,
+            "result": self.result,
+            "result_reason": self.result_reason,
+            "duration_sec": duration,
+            "total_moves": len(self.called_numbers),
+            "winning_move": winning_move,
+            "winning_lines": winning_lines,
+            "events": self.events,
+            "player_boards": player_boards,
+        }
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -162,6 +250,8 @@ class GameRoom:
             "winner": self.winner,
             "result": self.result,
             "result_reason": self.result_reason,
+            "chat_messages": self.chat_messages,
+            "events": self.events,
         }
 
     def get_player_view(self, player_id: str) -> Dict[str, Any]:
@@ -244,6 +334,8 @@ class GameRoom:
             "both_connected": both_connected,
             "completed_line_details": completed_line_details,
             "connection_diagnostics": diagnostics,
+            "chat_messages": self.chat_messages[-50:],
+            "inspection_data": self.get_inspection_data() if self.status == "FINISHED" else None,
         }
 
 
@@ -584,6 +676,21 @@ class RoomService:
                 return True, None
             if not self._both_verified_unlocked(room):
                 return False, "Both players must be actively connected to start the match"
+
+            # Strict Game-Start Rule: All required players MUST be ready!
+            not_ready = [
+                p.get("name", pid) for pid, p in room.players.items() if not p.get("ready")
+            ]
+            if not_ready:
+                return False, f"Waiting for {', '.join(not_ready)} to be ready."
+
+            # Strict Game-Start Rule: Both players MUST have valid boards!
+            for pid, b in room.boards.items():
+                valid, err = validate_board(b)
+                if not valid:
+                    pname = room.players.get(pid, {}).get("name", pid)
+                    return False, f"Player {pname} has an invalid board: {err}"
+
             await self._start_game_unlocked(room)
             return True, None
 
@@ -739,6 +846,8 @@ class RoomService:
         room.turn_started_at = now
         room.turn_deadline = now + TURN_DURATION_SEC
 
+        room.record_event("GAME_STARTED", payload={"game_session_id": room.game_session_id, "first_turn": room.current_turn})
+
         slog("game_started", room_id=room.room_id, game_session_id=room.game_session_id, current_turn=room.current_turn)
         await save_room_state(room.to_dict())
         await room.notify_listeners("GAME_STARTED", {
@@ -787,10 +896,14 @@ class RoomService:
             p1_has_bingo = p1_lines >= TARGET_LINES_FOR_BINGO
             p2_has_bingo = p2_lines >= TARGET_LINES_FOR_BINGO
 
+            room.record_event("NUMBER_CALLED", player_id=player_id, payload={
+                "number": number,
+                "p1_lines": p1_lines,
+                "p2_lines": p2_lines,
+            })
+
             if p1_has_bingo or p2_has_bingo:
                 # Winner detected!
-                # Simultaneous rule: if both reached Bingo on this move,
-                # the player whose turn it was wins because they triggered the transition!
                 if p1_has_bingo and p2_has_bingo:
                     winner_id = player_id
                 elif p1_has_bingo:
@@ -802,6 +915,13 @@ class RoomService:
                 room.winner = winner_id
                 room.result = "PLAYER1_WIN" if winner_id == p1_id else "PLAYER2_WIN"
                 room.result_reason = "BINGO"
+
+                room.record_event("GAME_FINISHED", player_id=winner_id, payload={
+                    "winner": winner_id,
+                    "result": room.result,
+                    "result_reason": room.result_reason,
+                    "winning_move": number,
+                })
 
                 await save_room_state(room.to_dict())
                 await room.notify_listeners("NUMBER_CALLED", {
@@ -847,11 +967,10 @@ class RoomService:
                 return False, "Already forfeited"
             if room.status != "PLAYING":
                 return False, "Game is not active"
-
-            pdata["is_forfeited"] = True
-
             if len(room.player_order) < 2:
                 return False, "Cannot forfeit without an opponent"
+
+            pdata["is_forfeited"] = True
 
             p1_id = room.player_order[0]
             p2_id = room.player_order[1]
@@ -861,6 +980,9 @@ class RoomService:
             room.winner = winner_id
             room.result = "PLAYER1_WIN" if winner_id == p1_id else "PLAYER2_WIN"
             room.result_reason = "PLAYER_FORFEIT"
+
+            room.record_event("PLAYER_FORFEITED", player_id=player_id, payload={"forfeit_player": player_id, "winner": winner_id})
+            room.record_event("GAME_FINISHED", player_id=winner_id, payload={"winner": winner_id, "result": room.result, "result_reason": room.result_reason})
 
             slog("player_forfeited", room_id=room.room_id, player_id=player_id, winner_id=winner_id)
             await save_room_state(room.to_dict())
@@ -876,6 +998,38 @@ class RoomService:
             })
             return True, None
 
+    async def send_chat(self, room: GameRoom, sender_id: str, message: str) -> Tuple[bool, Optional[str], Optional[Dict[str, Any]]]:
+        async with room.lock:
+            pdata = room.players.get(sender_id)
+            if not pdata:
+                return False, "Player is not in this room", None
+
+            msg = (message or "").strip()
+            if not msg:
+                return False, "Message cannot be empty", None
+            if len(msg) > 200:
+                return False, "Message exceeds 200 characters limit", None
+
+            sender_name = pdata.get("name") or "Player"
+            chat_entry = {
+                "id": str(uuid.uuid4()),
+                "room_id": room.room_id,
+                "sender_id": sender_id,
+                "sender_name": sender_name,
+                "message": msg,
+                "timestamp": time.time(),
+            }
+            room.chat_messages.append(chat_entry)
+            if len(room.chat_messages) > 100:
+                room.chat_messages = room.chat_messages[-100:]
+
+            await save_room_state(room.to_dict())
+            await room.notify_listeners("CHAT_MESSAGE", {
+                "chat": chat_entry,
+                "chat_messages": room.chat_messages[-50:],
+            })
+            return True, None, chat_entry
+
     async def _handle_turn_timeout_unlocked(self, room: GameRoom):
         """Turn timeout: current player loses, opponent wins immediately."""
         timed_out_player = room.current_turn
@@ -890,6 +1044,8 @@ class RoomService:
         room.winner = winner_id
         room.result = "PLAYER1_WIN" if winner_id == p1_id else "PLAYER2_WIN"
         room.result_reason = "TURN_TIMEOUT"
+
+        room.record_event("GAME_FINISHED", player_id=winner_id, payload={"winner": winner_id, "timed_out_player": timed_out_player, "result_reason": "TURN_TIMEOUT"})
 
         await save_room_state(room.to_dict())
         await room.notify_listeners("GAME_FINISHED", {
@@ -918,6 +1074,8 @@ class RoomService:
             room.winner = None
             room.result = "DRAW"
         room.result_reason = "MATCH_TIMEOUT"
+
+        room.record_event("GAME_FINISHED", player_id=room.winner, payload={"winner": room.winner, "result": room.result, "result_reason": "MATCH_TIMEOUT"})
 
         await save_room_state(room.to_dict())
         await room.notify_listeners("GAME_FINISHED", {

@@ -500,6 +500,25 @@ export function useBingoSocket({
     return sendAction("KICK_PLAYER", { target_player_id: targetPlayerId });
   }, [sendAction]);
 
+  const forfeitGame = useCallback(() => {
+    return sendAction("FORFEIT_GAME");
+  }, [sendAction]);
+
+  const sendChat = useCallback((message: string) => {
+    return sendAction("SEND_CHAT", { message });
+  }, [sendAction]);
+
+  const resetBoard = useCallback(() => {
+    const canonicalGrid = [
+      [1, 2, 3, 4, 5],
+      [6, 7, 8, 9, 10],
+      [11, 12, 13, 14, 15],
+      [16, 17, 18, 19, 20],
+      [21, 22, 23, 24, 25],
+    ];
+    return sendAction("SET_BOARD", { board: canonicalGrid });
+  }, [sendAction]);
+
   const peerConnected = Boolean(gameState?.peer_connected);
   const bothConnected = Boolean(gameState?.both_connected);
   const isConnected = connectionState === "CONNECTED" && bothConnected;
@@ -517,14 +536,19 @@ export function useBingoSocket({
     isLeader,
     peerConnected,
     bothConnected,
+    chatMessages: gameState?.chat_messages || [],
+    inspectionData: gameState?.inspection_data || null,
     callNumber,
     setReady,
     randomizeBoard,
     swapCells,
     setEntireBoard,
+    resetBoard,
     requestRematch,
     startGame,
     kickPlayer,
+    forfeitGame,
+    sendChat,
     reconnect: connect,
     clearError: () => setError(null),
   };

@@ -7,6 +7,7 @@ import { DhakaBorder, NepalSunMoonIcon } from "./DhakaPattern";
 import { soundFX } from "../lib/audio";
 import { Language, translations } from "../lib/translations";
 import { copyToClipboard } from "../lib/utils";
+import { ThemeSelector } from "./ThemeSelector";
 
 interface HeaderProps {
   lang: Language;
@@ -98,6 +99,8 @@ export const Header: React.FC<HeaderProps> = ({
           >
             {devanagariNumerals ? "१ २ ३" : "1 2 3"}
           </button>
+
+          <ThemeSelector lang={lang} />
 
           {/* Language toggle */}
           <button

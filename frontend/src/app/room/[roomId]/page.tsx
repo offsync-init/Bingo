@@ -16,6 +16,7 @@ import {
   Play,
   Activity,
   History,
+  Flag,
 } from "lucide-react";
 import { Header } from "../../../components/Header";
 import { DhakaBorder, NepaliMandalaBadge } from "../../../components/DhakaPattern";
@@ -25,6 +26,9 @@ import { BingoProgress } from "../../../components/BingoProgress";
 import { TimerDisplay } from "../../../components/TimerDisplay";
 import { GameNotificationBanner } from "../../../components/Notifications";
 import { GameModal } from "../../../components/GameModal";
+import { PlayerStatus } from "../../../components/PlayerStatus";
+import { ChatPanel } from "../../../components/ChatPanel";
+import { GameInspectionModal } from "../../../components/GameInspectionModal";
 import { useBingoSocket } from "../../../hooks/useBingoSocket";
 import { Language, translations } from "../../../lib/translations";
 import {
@@ -57,9 +61,12 @@ export default function RoomLobbyPage({ params }: PageProps) {
   const [prepSecLeft, setPrepSecLeft] = useState<number>(60);
   const [disconnectSecLeft, setDisconnectSecLeft] = useState<number | null>(null);
 
-  // Kick confirmation and kicked modals
+  // Kick confirmation, kicked, forfeit, chat, and inspection modals
   const [kickCandidate, setKickCandidate] = useState<{ id: string; name: string } | null>(null);
   const [showKickedModal, setShowKickedModal] = useState<boolean>(false);
+  const [showForfeitConfirm, setShowForfeitConfirm] = useState<boolean>(false);
+  const [isChatOpen, setIsChatOpen] = useState<boolean>(false);
+  const [showInspectionModal, setShowInspectionModal] = useState<boolean>(false);
 
   const t = translations[lang];
 
@@ -81,14 +88,19 @@ export default function RoomLobbyPage({ params }: PageProps) {
     isLeader,
     peerConnected,
     bothConnected,
+    chatMessages,
+    inspectionData,
     lastCalled,
     callNumber,
     randomizeBoard,
     swapCells,
+    resetBoard,
     setReady,
     startGame,
     kickPlayer,
     requestRematch,
+    forfeitGame,
+    sendChat,
   } = useBingoSocket({
     roomId,
     playerId,
@@ -179,9 +191,17 @@ export default function RoomLobbyPage({ params }: PageProps) {
     ? gameState.players[gameState.current_turn]?.name || "Player"
     : undefined;
 
+  const iForfeited = Boolean(myPlayer?.is_forfeited);
+  const opponentForfeited = Boolean(opponent?.is_forfeited);
+
   const handleCallNumber = (num: number) => {
-    if (!isMyTurn) return;
+    if (!isMyTurn || iForfeited) return;
     callNumber(num);
+  };
+
+  const handleConfirmForfeit = () => {
+    forfeitGame();
+    setShowForfeitConfirm(false);
   };
 
   const handleExit = () => {
@@ -387,20 +407,11 @@ export default function RoomLobbyPage({ params }: PageProps) {
                   )}
                 </div>
 
-                <div className="flex items-center justify-between">
-                  <span className="text-[10px] text-slate-400">
-                    {isConnected ? t.connected : connectionState === "FAILED" ? t.connFailed : t.connConnecting}
-                  </span>
-                  <span
-                    className={`px-2 py-0.5 rounded text-[10px] font-bold ${
-                      isMyReady
-                        ? "bg-emerald-500/20 text-emerald-400 border border-emerald-500/40"
-                        : "bg-amber-500/20 text-amber-400 border border-amber-500/40"
-                    }`}
-                  >
-                    {isMyReady ? t.ready : t.notReady}
-                  </span>
-                </div>
+                <PlayerStatus
+                  player={myPlayer}
+                  connected={isConnected}
+                  lang={lang}
+                />
               </div>
 
               {/* Player 2 (Opponent) */}
@@ -430,29 +441,13 @@ export default function RoomLobbyPage({ params }: PageProps) {
                 <div className="flex items-center justify-between">
                   {opponent ? (
                     <>
-                      <div className="flex items-center gap-1.5">
-                        <span
-                          className={`w-2 h-2 rounded-full ${
-                            peerConnected ? "bg-emerald-400" : "bg-amber-400 animate-pulse"
-                          }`}
+                      <div className="flex items-center justify-between gap-2 w-full">
+                        <PlayerStatus
+                          player={opponent}
+                          connected={peerConnected}
+                          lang={lang}
+                          compact
                         />
-                        <span className="text-[10px] text-slate-400">
-                          {peerConnected ? t.connected : t.waitingForPlayerConnection}
-                        </span>
-                      </div>
-
-                      <div className="flex items-center gap-2">
-                        <span
-                          className={`px-2 py-0.5 rounded text-[10px] font-bold ${
-                            opponent.ready
-                              ? "bg-emerald-500/20 text-emerald-400 border border-emerald-500/40"
-                              : "bg-amber-500/20 text-amber-400 border border-amber-500/40"
-                          }`}
-                        >
-                          {opponent.ready ? t.ready : t.notReady}
-                        </span>
-
-                        {/* Room Leader Authority: Kick Player Button */}
                         {isLeader && (
                           <button
                             onClick={() => setKickCandidate({ id: opponent.id, name: opponent.name })}
@@ -477,16 +472,16 @@ export default function RoomLobbyPage({ params }: PageProps) {
             {isLeader && opponent && (gameState?.status === "PREPARING" || gameState?.status === "WAITING") && (
               <div className="mt-3 pt-3 border-t border-slate-800 flex items-center justify-between">
                 <span className="text-[11px] text-slate-400">
-                  {bothConnected
-                    ? lang === "ne"
-                      ? "दुबै खेलाडी सम्पर्कमा छन्। खेल तुरुन्त सुरु गर्न सक्नुहुन्छ।"
-                      : "Both players connected. You may launch the game immediately."
-                    : t.waitingForPlayerConnection}
+                  {!bothConnected
+                    ? t.waitingForPlayerConnection
+                    : !playersList.every((p) => p.ready)
+                    ? (lang === "ne" ? `खेल सुरु गर्न ${opponent.name} को तयारीको प्रतीक्षा गरिँदैछ...` : `Waiting for ${opponent.name} to be ready...`)
+                    : (lang === "ne" ? "दुबै खेलाडी तयार छन्! खेल सुरु गर्न सक्नुहुन्छ।" : "All players ready! Launch the match now.")}
                 </span>
                 <button
                   onClick={startGame}
-                  disabled={!bothConnected}
-                  className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold bg-gradient-to-r from-amber-500 to-amber-600 hover:from-amber-400 hover:to-amber-500 text-slate-950 disabled:opacity-40 disabled:cursor-not-allowed shadow transition-all"
+                  disabled={!bothConnected || !playersList.every((p) => p.ready)}
+                  className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold bg-gradient-to-r from-amber-500 to-amber-600 hover:from-amber-400 hover:to-amber-500 text-slate-950 disabled:opacity-40 disabled:cursor-not-allowed shadow transition-all active:scale-95"
                 >
                   <Play className="w-3.5 h-3.5 fill-current" />
                   <span>{t.startMatchNow}</span>
@@ -553,11 +548,12 @@ export default function RoomLobbyPage({ params }: PageProps) {
               </div>
             </div>
 
-            {/* Preparation Board with Click-to-Swap, Drag-and-Drop, Randomize, and Ready Toggle */}
+            {/* Preparation Board with Click-to-Swap, Drag-and-Drop, Randomize, Reset, and Ready Toggle */}
             <PreparationBoard
               board={gameState.board}
               onSwapCells={swapCells}
               onRandomize={randomizeBoard}
+              onResetBoard={resetBoard}
               isReady={isMyReady}
               onToggleReady={setReady}
               lang={lang}
@@ -612,6 +608,8 @@ export default function RoomLobbyPage({ params }: PageProps) {
                     onCallNumber={handleCallNumber}
                     devanagariNumerals={devanagariNumerals}
                     completedLines={gameState.completed_line_details}
+                    disabled={iForfeited}
+                    disabledLabel={t.youForfeited}
                   />
                 ) : (
                   <div className="p-12 text-center text-slate-400">
@@ -649,12 +647,19 @@ export default function RoomLobbyPage({ params }: PageProps) {
                         )}
                       </div>
                       <span className="text-[10px] text-slate-400 block -mt-0.5">
-                        {peerConnected
+                        {opponentForfeited
+                          ? t.forfeited
+                          : peerConnected
                           ? t.connected
                           : disconnectSecLeft !== null
                           ? `${t.disconnected} (${disconnectSecLeft}s)`
                           : t.disconnected}
                       </span>
+                      {opponent && (
+                        <div className="mt-1">
+                          <PlayerStatus player={opponent} connected={peerConnected} lang={lang} compact />
+                        </div>
+                      )}
                     </div>
                   </div>
 
@@ -703,6 +708,23 @@ export default function RoomLobbyPage({ params }: PageProps) {
                   )}
                 </div>
 
+                {isPlaying && !iForfeited && (
+                  <div className="bg-slate-900/70 border border-slate-800 rounded-2xl p-4">
+                    <p className="text-[10px] uppercase tracking-wider text-slate-500 font-bold mb-2">
+                      {lang === "ne" ? "खेल मेनु" : "Game Menu"}
+                    </p>
+                    <button
+                      type="button"
+                      onClick={() => setShowForfeitConfirm(true)}
+                      aria-label={t.forfeitGame}
+                      className="w-full flex items-center justify-center gap-2 py-2 px-3 rounded-xl bg-transparent hover:bg-rose-950/50 text-rose-400 hover:text-rose-300 border border-rose-800/40 text-xs font-semibold transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-rose-400"
+                    >
+                      <Flag className="w-3.5 h-3.5" />
+                      <span>{t.forfeitGame}</span>
+                    </button>
+                  </div>
+                )}
+
                 {/* Quick Strategic Tips */}
                 <div className="bg-slate-900/70 border border-slate-800 rounded-2xl p-4 text-xs text-slate-300 space-y-2">
                   <span className="text-[11px] font-bold text-amber-400 uppercase tracking-wider block">
@@ -720,7 +742,7 @@ export default function RoomLobbyPage({ params }: PageProps) {
         )}
       </main>
 
-      {/* Game Over Modal with Rematch Coordination */}
+      {/* Game Over Modal with Rematch & Inspection Coordination */}
       <GameModal
         isOpen={isFinished}
         result={gameState?.result ?? null}
@@ -729,12 +751,74 @@ export default function RoomLobbyPage({ params }: PageProps) {
         isDraw={isDraw}
         myLines={myLines}
         opponentLines={opponentLines}
+        myName={myPlayer?.name}
+        opponentName={opponent?.name}
+        winnerName={gameState?.winner ? gameState.players[gameState.winner]?.name : undefined}
         rematchRequested={rematchRequested}
         onRequestRematch={requestRematch}
+        onInspectGame={() => setShowInspectionModal(true)}
         onExit={handleExit}
         lang={lang}
         devanagariNumerals={devanagariNumerals}
       />
+
+      {/* Real-Time Multiplayer Chat Drawer */}
+      <ChatPanel
+        messages={chatMessages}
+        myPlayerId={playerId}
+        onSendMessage={sendChat}
+        lang={lang}
+        isOpen={isChatOpen}
+        onToggle={() => setIsChatOpen((prev) => !prev)}
+      />
+
+      {/* Post-Game Replay & Inspection Modal */}
+      <GameInspectionModal
+        isOpen={showInspectionModal}
+        onClose={() => setShowInspectionModal(false)}
+        inspectionData={inspectionData || (gameState?.inspection_data ?? null)}
+        myPlayerId={playerId}
+        lang={lang}
+        devanagariNumerals={devanagariNumerals}
+      />
+
+      {showForfeitConfirm && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/80 backdrop-blur-sm animate-in fade-in"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="forfeit-title"
+          onKeyDown={(e) => {
+            if (e.key === "Escape") setShowForfeitConfirm(false);
+          }}
+        >
+          <div className="bg-slate-900 border border-rose-500/40 rounded-2xl p-6 max-w-sm w-full shadow-2xl text-center">
+            <div className="w-12 h-12 rounded-full bg-rose-500/20 border border-rose-500/50 flex items-center justify-center mx-auto mb-3">
+              <Flag className="w-6 h-6 text-rose-400" />
+            </div>
+            <h3 id="forfeit-title" className="text-base font-bold text-white mb-2">
+              {t.forfeitConfirmTitle}
+            </h3>
+            <p className="text-xs text-slate-300 mb-6">{t.forfeitConfirmMessage}</p>
+            <div className="flex gap-2">
+              <button
+                type="button"
+                onClick={() => setShowForfeitConfirm(false)}
+                className="flex-1 py-2 px-3 rounded-xl bg-slate-800 hover:bg-slate-700 text-xs font-semibold text-slate-300 transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-amber-400"
+              >
+                {t.cancel}
+              </button>
+              <button
+                type="button"
+                onClick={handleConfirmForfeit}
+                className="flex-1 py-2 px-3 rounded-xl bg-rose-600 hover:bg-rose-500 text-xs font-bold text-white transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-rose-300"
+              >
+                {t.confirmForfeit}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Kick Player Confirmation Modal (Leader only) */}
       {kickCandidate && (

@@ -21,6 +21,10 @@ USER_ERROR_MAP = {
     "Only the room leader can start the game": "Only the room leader can start the game.",
     "Only the room leader can kick players": "Only the room leader can remove players.",
     "Both players must be actively connected to start the match": "Waiting for player connection...",
+    "Already forfeited": "You have already forfeited this game.",
+    "Game is not active": "The game is not currently active.",
+    "You have forfeited this game": "You have forfeited this game.",
+    "Player is not in this room": "You are not in this room.",
 }
 
 
@@ -401,6 +405,17 @@ async def websocket_endpoint(
 
                 elif action == "REQUEST_REMATCH":
                     await room_service.request_rematch(room, player_id)
+
+                elif action == "FORFEIT_GAME":
+                    ok, err = await room_service.forfeit_game(room, player_id)
+                    if not ok:
+                        await _send_error(room_id, player_id, err or "Cannot forfeit", "FORFEIT_REJECTED")
+
+                elif action == "SEND_CHAT":
+                    msg = str(data.get("message") or "")
+                    ok, err, _ = await room_service.send_chat(room, player_id, msg)
+                    if not ok:
+                        await _send_error(room_id, player_id, err or "Cannot send message", "CHAT_REJECTED")
 
             except (ValueError, TypeError) as err:
                 await _send_error(room_id, player_id, "Invalid data payload")

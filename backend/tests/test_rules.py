@@ -362,6 +362,12 @@ async def test_start_game_by_leader_validation():
 
     force_verified(room)
     ok, err = await service.start_game_by_leader(room, p1)
+    assert ok is False
+    assert "ready" in err.lower()
+
+    await service.set_player_ready(room, p1, True)
+    await service.set_player_ready(room, p2, True)
+    ok, err = await service.start_game_by_leader(room, p1)
     assert ok is True
     assert room.status == "PLAYING"
     assert room.current_turn == p1
@@ -401,6 +407,8 @@ async def test_duplicate_start_keeps_same_session():
     room = await service.create_room(p1, "Leader")
     await service.join_room(room.room_id, p2, "Guest")
     force_verified(room)
+    await service.set_player_ready(room, p1, True)
+    await service.set_player_ready(room, p2, True)
     ok, err = await service.start_game_by_leader(room, p1)
     assert ok is True
     session = room.game_session_id
@@ -408,3 +416,189 @@ async def test_duplicate_start_keeps_same_session():
     assert ok2 is True
     assert room.game_session_id == session
     assert room.status == "PLAYING"
+
+
+async def _playing_room():
+    service = RoomService()
+    p1 = "user_1"
+    p2 = "user_2"
+    room = await service.create_room(p1, "Player 1")
+    await service.join_room(room.room_id, p2, "Player 2")
+    force_verified(room)
+    await service.set_player_ready(room, p1, True)
+    await service.set_player_ready(room, p2, True)
+    assert room.status == "PLAYING"
+    return service, room, p1, p2
+
+
+@pytest.mark.asyncio
+async def test_player_forfeit_ends_game_and_opponent_wins():
+    service, room, p1, p2 = await _playing_room()
+    ok, err = await service.forfeit_game(room, p2)
+    assert ok is True
+    assert err is None
+    assert room.players[p2]["is_forfeited"] is True
+    assert room.players[p1]["is_forfeited"] is False
+    assert room.status == "FINISHED"
+    assert room.winner == p1
+    assert room.result == "PLAYER1_WIN"
+    assert room.result_reason == "PLAYER_FORFEIT"
+    assert room.leader_id == p1
+
+
+@pytest.mark.asyncio
+async def test_duplicate_forfeit_is_rejected():
+    service, room, p1, p2 = await _playing_room()
+    ok, err = await service.forfeit_game(room, p1)
+    assert ok is True
+    ok2, err2 = await service.forfeit_game(room, p1)
+    assert ok2 is False
+    assert "Already forfeited" in err2
+    assert room.result_reason == "PLAYER_FORFEIT"
+    assert room.winner == p2
+
+
+@pytest.mark.asyncio
+async def test_forfeit_rejected_when_not_playing():
+    service = RoomService()
+    p1 = "user_1"
+    p2 = "user_2"
+    room = await service.create_room(p1, "Player 1")
+    await service.join_room(room.room_id, p2, "Player 2")
+    ok, err = await service.forfeit_game(room, p1)
+    assert ok is False
+    assert "not active" in err.lower()
+    assert room.players[p1].get("is_forfeited") is False
+
+
+@pytest.mark.asyncio
+async def test_forfeit_survives_disconnect_and_rejoin():
+    service, room, p1, p2 = await _playing_room()
+    ok, err = await service.forfeit_game(room, p1)
+    assert ok is True
+    await service.mark_player_disconnected(room, p1)
+    assert room.players[p1]["is_forfeited"] is True
+    success, join_err, _ = await service.join_room(room.room_id, p1, "Player 1")
+    assert success is True
+    assert room.players[p1]["is_forfeited"] is True
+    assert room.players[p1]["connected"] is False  # handshake not complete
+    assert room.status == "FINISHED"
+
+
+@pytest.mark.asyncio
+async def test_forfeit_does_not_transfer_host():
+    service, room, p1, p2 = await _playing_room()
+    assert room.leader_id == p1
+    ok, err = await service.forfeit_game(room, p1)
+    assert ok is True
+    assert room.leader_id == p1
+    assert room.players[p1]["is_leader"] is True
+
+
+@pytest.mark.asyncio
+async def test_forfeited_player_cannot_call_number():
+    service, room, p1, p2 = await _playing_room()
+    room.players[p1]["is_forfeited"] = True
+    num = room.boards[p1][0][0]
+    ok, err = await service.call_number(room, p1, num)
+    assert ok is False
+    assert "forfeit" in err.lower()
+
+
+@pytest.mark.asyncio
+async def test_disconnect_is_not_forfeit():
+    service, room, p1, p2 = await _playing_room()
+    await service.mark_player_disconnected(room, p2)
+    assert room.players[p2]["is_forfeited"] is False
+    assert room.status == "PLAYING"
+    assert room.players[p2]["disconnected_at"] is not None
+
+
+@pytest.mark.asyncio
+async def test_rematch_clears_forfeit():
+    service, room, p1, p2 = await _playing_room()
+    await service.forfeit_game(room, p2)
+    await service.request_rematch(room, p1)
+    await service.request_rematch(room, p2)
+    assert room.status == "PREPARING"
+    assert room.players[p1]["is_forfeited"] is False
+    assert room.players[p2]["is_forfeited"] is False
+
+
+@pytest.mark.asyncio
+async def test_strict_start_game_readiness():
+    service = RoomService()
+    p1 = "user_1"
+    p2 = "user_2"
+    room = await service.create_room(p1, "Host")
+    await service.join_room(room.room_id, p2, "Guest")
+    force_verified(room)
+
+    # Host ready, Guest NOT ready
+    await service.set_player_ready(room, p1, True)
+    ok, err = await service.start_game_by_leader(room, p1)
+    assert ok is False
+    assert "Waiting for Guest" in err
+    assert room.status == "PREPARING"
+
+    # Guest ready -> setting both ready auto-starts or host can start!
+    await service.set_player_ready(room, p2, True)
+    assert room.status == "PLAYING"
+
+
+@pytest.mark.asyncio
+async def test_chat_message_system():
+    service = RoomService()
+    p1 = "user_1"
+    p2 = "user_2"
+    room = await service.create_room(p1, "Apsan")
+    await service.join_room(room.room_id, p2, "Rahul")
+
+    # Empty chat -> rejected
+    ok1, err1, _ = await service.send_chat(room, p1, "   ")
+    assert ok1 is False
+    assert "empty" in err1.lower()
+
+    # Valid chat -> stored with server-authoritative sender name
+    ok2, err2, msg2 = await service.send_chat(room, p1, "Good luck Rahul!")
+    assert ok2 is True
+    assert msg2["sender_name"] == "Apsan"
+    assert msg2["message"] == "Good luck Rahul!"
+    assert len(room.chat_messages) == 1
+
+    # Reply from Rahul
+    ok3, err3, msg3 = await service.send_chat(room, p2, "GG let's play!")
+    assert ok3 is True
+    assert msg3["sender_name"] == "Rahul"
+    assert len(room.chat_messages) == 2
+
+
+@pytest.mark.asyncio
+async def test_event_history_and_inspection_payload():
+    service, room, p1, p2 = await _playing_room()
+    assert len(room.events) >= 1  # GAME_STARTED event
+
+    # Make moves until game finishes
+    called = []
+    board_p1 = room.boards[p1]
+    for row in board_p1:
+        for num in row:
+            if num not in called:
+                curr = room.current_turn
+                ok, err = await service.call_number(room, curr, num)
+                called.append(num)
+                if room.status == "FINISHED":
+                    break
+        if room.status == "FINISHED":
+            break
+
+    assert room.status == "FINISHED"
+    inspection = room.get_inspection_data()
+    assert inspection is not None
+    assert inspection["status"] == "FINISHED"
+    assert len(inspection["events"]) >= 2
+    assert "player_boards" in inspection
+    assert p1 in inspection["player_boards"]
+    assert p2 in inspection["player_boards"]
+    assert inspection["player_boards"][p1]["player_name"] == "Player 1"
+

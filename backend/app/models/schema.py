@@ -8,6 +8,7 @@ class PlayerInfo(BaseModel):
     ready: bool = False
     rematch_requested: bool = False
     disconnected_at: Optional[float] = None
+    is_forfeited: bool = False
 
 
 class MoveRequest(BaseModel):
