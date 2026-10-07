@@ -28,14 +28,21 @@ export const Header: React.FC<HeaderProps> = ({
   roomCode,
 }) => {
   const [copied, setCopied] = React.useState(false);
+  const [copyFailed, setCopyFailed] = React.useState(false);
   const t = translations[lang];
 
   const handleCopyCode = async () => {
     if (!roomCode) return;
-    const ok = await copyToClipboard(roomCode);
+    const displayed = roomCode.trim();
+    const ok = await copyToClipboard(displayed);
     if (ok) {
+      setCopyFailed(false);
       setCopied(true);
       setTimeout(() => setCopied(false), 2000);
+    } else {
+      setCopied(false);
+      setCopyFailed(true);
+      setTimeout(() => setCopyFailed(false), 2500);
     }
   };
 
@@ -65,11 +72,11 @@ export const Header: React.FC<HeaderProps> = ({
               {t.roomCode}:
             </span>
             <span className="font-mono text-sm font-bold text-white tracking-widest">
-              {roomCode}
+              {roomCode.trim()}
             </span>
             <button
               onClick={handleCopyCode}
-              title="Copy room code"
+              title={copyFailed ? t.copyFailed : "Copy room code"}
               className="ml-1 text-slate-400 hover:text-amber-300 transition-colors p-0.5"
             >
               {copied ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}

@@ -17,7 +17,7 @@ export default function JoinRoomPage() {
 
   const [roomCode, setRoomCode] = useState<string>("");
   const [playerName, setPlayerName] = useState<string>("");
-  const [loading, setLoading] = useState<boolean>(false);
+  const [phase, setPhase] = useState<"idle" | "validating" | "joining">("idle");
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -25,17 +25,24 @@ export default function JoinRoomPage() {
   }, []);
 
   const t = translations[lang];
+  const loading = phase !== "idle";
 
   const handleJoin = async (e: React.FormEvent) => {
     e.preventDefault();
     setError(null);
     const code = roomCode.trim().toUpperCase();
     if (!code) {
-      setError("Please enter a room code");
+      setError(lang === "ne" ? "कृपया कोठा कोड हाल्नुहोस्।" : "Please enter a room code.");
+      return;
+    }
+    if (!/^[A-Z0-9]{4,8}$/.test(code)) {
+      setError(lang === "ne" ? "कोठा कोड अमान्य छ।" : "That room code is not valid.");
       return;
     }
 
-    setLoading(true);
+    setPhase("validating");
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 12000);
 
     try {
       const playerId = getOrCreatePlayerId();
@@ -43,6 +50,23 @@ export default function JoinRoomPage() {
       setStoredPlayerName(name);
 
       const apiUrl = process.env.NEXT_PUBLIC_API_URL || "https://bingo-backend-e686.onrender.com";
+
+      const lookup = await fetch(`${apiUrl}/api/rooms/${code}?player_id=${encodeURIComponent(playerId)}`, { signal: controller.signal });
+      if (lookup.status === 404) {
+        throw new Error(lang === "ne" ? "यो कोठा फेला परेन वा सकिएको छ।" : "This room does not exist or has expired.");
+      }
+      if (!lookup.ok) {
+        throw new Error(lang === "ne" ? "कोठा जाँच गर्न सकिएन।" : "Unable to check this room. Please try again.");
+      }
+      const info = await lookup.json();
+      if (info.is_full && !info.is_member) {
+        throw new Error(lang === "ne" ? "यो कोठा पहिले नै भरिएको छ (अधिकतम २ खेलाडी)।" : "This room is already full (maximum 2 players).");
+      }
+      if (info.in_progress) {
+        throw new Error(lang === "ne" ? "यो खेल पहिले नै सुरु भइसकेको छ।" : "This match has already started.");
+      }
+
+      setPhase("joining");
       const res = await fetch(`${apiUrl}/api/rooms/${code}/join`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -50,17 +74,25 @@ export default function JoinRoomPage() {
           player_id: playerId,
           player_name: name,
         }),
+        signal: controller.signal,
       });
 
       if (!res.ok) {
         const errData = await res.json().catch(() => ({}));
-        throw new Error(errData.detail || "Failed to join room");
+        const detail = typeof errData.detail === "string" ? errData.detail : "Failed to join room";
+        throw new Error(detail);
       }
 
       router.push(`/room/${code}`);
     } catch (err: any) {
-      setError(err.message || "Could not join room");
-      setLoading(false);
+      if (err?.name === "AbortError") {
+        setError(lang === "ne" ? "सम्पर्क समय सकियो। फेरि प्रयास गर्नुहोस्।" : "Connection timed out. Please try again.");
+      } else {
+        setError(err.message || (lang === "ne" ? "कोठामा प्रवेश गर्न सकिएन।" : "Could not join room"));
+      }
+      setPhase("idle");
+    } finally {
+      clearTimeout(timeout);
     }
   };
 
@@ -155,7 +187,7 @@ export default function JoinRoomPage() {
                 {loading ? (
                   <>
                     <Loader2 className="w-4 h-4 animate-spin text-white" />
-                    <span>{t.joiningRoom}</span>
+                    <span>{phase === "validating" ? t.validatingRoom : t.joiningRoom}</span>
                   </>
                 ) : (
                   <>

@@ -15,10 +15,16 @@ import {
   UserX,
   Play,
   Activity,
+  History,
 } from "lucide-react";
 import { Header } from "../../../components/Header";
 import { DhakaBorder, NepaliMandalaBadge } from "../../../components/DhakaPattern";
 import { PreparationBoard } from "../../../components/PreparationBoard";
+import { Board } from "../../../components/Board";
+import { BingoProgress } from "../../../components/BingoProgress";
+import { TimerDisplay } from "../../../components/TimerDisplay";
+import { GameNotificationBanner } from "../../../components/Notifications";
+import { GameModal } from "../../../components/GameModal";
 import { useBingoSocket } from "../../../hooks/useBingoSocket";
 import { Language, translations } from "../../../lib/translations";
 import {
@@ -47,7 +53,9 @@ export default function RoomLobbyPage({ params }: PageProps) {
   const [playerName, setPlayerName] = useState<string>("");
   const [copiedLink, setCopiedLink] = useState<boolean>(false);
   const [copiedCode, setCopiedCode] = useState<boolean>(false);
+  const [copyFailed, setCopyFailed] = useState<boolean>(false);
   const [prepSecLeft, setPrepSecLeft] = useState<number>(60);
+  const [disconnectSecLeft, setDisconnectSecLeft] = useState<number | null>(null);
 
   // Kick confirmation and kicked modals
   const [kickCandidate, setKickCandidate] = useState<{ id: string; name: string } | null>(null);
@@ -73,11 +81,14 @@ export default function RoomLobbyPage({ params }: PageProps) {
     isLeader,
     peerConnected,
     bothConnected,
+    lastCalled,
+    callNumber,
     randomizeBoard,
     swapCells,
     setReady,
     startGame,
     kickPlayer,
+    requestRematch,
   } = useBingoSocket({
     roomId,
     playerId,
@@ -86,13 +97,6 @@ export default function RoomLobbyPage({ params }: PageProps) {
       setShowKickedModal(true);
     },
   });
-
-  // When game enters PLAYING status, redirect to /game/[roomId]
-  useEffect(() => {
-    if (gameState?.status === "PLAYING") {
-      router.push(`/game/${roomId}`);
-    }
-  }, [gameState?.status, roomId, router]);
 
   // Synchronized 60-second preparation countdown timer
   useEffect(() => {
@@ -107,6 +111,25 @@ export default function RoomLobbyPage({ params }: PageProps) {
     return () => clearInterval(interval);
   }, [gameState?.preparation_deadline]);
 
+  const playersList = Object.values(gameState?.players || {});
+  const opponent = playersList.find((p) => p.id !== playerId);
+
+  // Opponent disconnect countdown timer
+  useEffect(() => {
+    if (!opponent || peerConnected || !opponent.disconnected_at) {
+      setDisconnectSecLeft(null);
+      return;
+    }
+
+    const interval = setInterval(() => {
+      const elapsed = Date.now() / 1000 - (opponent.disconnected_at || 0);
+      const remaining = Math.max(0, 30 - elapsed);
+      setDisconnectSecLeft(Math.ceil(remaining));
+    }, 250);
+
+    return () => clearInterval(interval);
+  }, [opponent, peerConnected, opponent?.disconnected_at]);
+
   const handleCopyLink = async () => {
     if (typeof window === "undefined") return;
     const url = `${window.location.origin}/room/${roomId}`;
@@ -118,10 +141,16 @@ export default function RoomLobbyPage({ params }: PageProps) {
   };
 
   const handleCopyCode = async () => {
-    const ok = await copyToClipboard(roomId);
+    const code = roomId.trim();
+    const ok = await copyToClipboard(code);
     if (ok) {
+      setCopyFailed(false);
       setCopiedCode(true);
       setTimeout(() => setCopiedCode(false), 2500);
+    } else {
+      setCopiedCode(false);
+      setCopyFailed(true);
+      setTimeout(() => setCopyFailed(false), 2500);
     }
   };
 
@@ -135,8 +164,31 @@ export default function RoomLobbyPage({ params }: PageProps) {
   const myPlayer = gameState?.players?.[playerId];
   const isMyReady = myPlayer?.ready || false;
 
-  const playersList = Object.values(gameState?.players || {});
-  const opponent = playersList.find((p) => p.id !== playerId);
+  const isPlaying = gameState?.status === "PLAYING";
+  const isFinished = gameState?.status === "FINISHED";
+  const isGamePhase = isPlaying || isFinished;
+
+  const isMyTurn = gameState?.current_turn === playerId && isPlaying;
+  const myLines = gameState?.player_lines || 0;
+  const opponentLines = gameState?.opponent_lines || 0;
+  const isWinner = gameState?.winner === playerId;
+  const isDraw = gameState?.result === "DRAW";
+  const rematchRequested = myPlayer?.rematch_requested || false;
+
+  const currentTurnPlayer = gameState?.current_turn
+    ? gameState.players[gameState.current_turn]?.name || "Player"
+    : undefined;
+
+  const handleCallNumber = (num: number) => {
+    if (!isMyTurn) return;
+    callNumber(num);
+  };
+
+  const handleExit = () => {
+    router.push("/");
+  };
+
+  const formatNum = (n: number) => (devanagariNumerals ? toDevanagari(n) : n);
 
   // Verified Connection State Indicator
   const getConnectionIndicator = () => {
@@ -185,7 +237,7 @@ export default function RoomLobbyPage({ params }: PageProps) {
         dotClass: "bg-amber-500",
         pingClass: "bg-amber-500/50 animate-pulse",
         textClass: "text-amber-400",
-        label: lang === "ne" ? "विपक्षीको प्रतीक्षा..." : "Waiting for peer...",
+        label: t.waitingForPlayerConnection,
       };
     }
 
@@ -211,205 +263,240 @@ export default function RoomLobbyPage({ params }: PageProps) {
         roomCode={roomId}
       />
 
-      <main className="flex-1 max-w-4xl mx-auto w-full px-4 py-6 flex flex-col items-center">
-        {/* Navigation Breadcrumb */}
-        <div className="w-full flex items-center justify-between mb-4">
-          <Link
-            href="/"
-            className="inline-flex items-center gap-1.5 text-xs text-amber-400 hover:text-amber-300 font-semibold transition-colors"
-          >
-            <ArrowLeft className="w-4 h-4" />
-            <span>{t.exitHome}</span>
-          </Link>
-
-          <div className="flex items-center gap-2">
-            <button
-              onClick={handleCopyCode}
-              className="flex items-center gap-1.5 text-xs font-semibold px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-amber-300 border border-slate-700 transition-colors shadow"
-              title="Copy Room Code"
+      <main className="flex-1 max-w-6xl mx-auto w-full px-4 py-4 sm:py-6 flex flex-col items-center gap-4">
+        {/* Navigation Breadcrumb (When in lobby/preparation) */}
+        {!isGamePhase && (
+          <div className="w-full max-w-4xl flex items-center justify-between mb-2">
+            <Link
+              href="/"
+              className="inline-flex items-center gap-1.5 text-xs text-amber-400 hover:text-amber-300 font-semibold transition-colors"
             >
-              {copiedCode ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
-              <span>{copiedCode ? t.copied : t.copyCode}</span>
-            </button>
+              <ArrowLeft className="w-4 h-4" />
+              <span>{t.exitHome}</span>
+            </Link>
 
-            <button
-              onClick={handleCopyLink}
-              className="flex items-center gap-1.5 text-xs font-semibold px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-amber-300 border border-amber-500/40 transition-colors shadow"
-            >
-              {copiedLink ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Share2 className="w-3.5 h-3.5" />}
-              <span>{copiedLink ? t.copied : t.shareRoom}</span>
-            </button>
+            <div className="flex items-center gap-2">
+              <button
+                onClick={handleCopyCode}
+                className="flex items-center gap-1.5 text-xs font-semibold px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-amber-300 border border-slate-700 transition-colors shadow"
+                title="Copy Room Code"
+              >
+                {copiedCode ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
+                <span>{copiedCode ? t.copied : copyFailed ? t.copyFailed : t.copyCode}</span>
+              </button>
+
+              <button
+                onClick={handleCopyLink}
+                className="flex items-center gap-1.5 text-xs font-semibold px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-amber-300 border border-amber-500/40 transition-colors shadow"
+              >
+                {copiedLink ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Share2 className="w-3.5 h-3.5" />}
+                <span>{copiedLink ? t.copied : t.shareRoom}</span>
+              </button>
+            </div>
           </div>
-        </div>
+        )}
 
+        {/* Global Error Banner */}
         {error && (
-          <div className="w-full max-w-xl mb-4 p-3.5 rounded-xl bg-rose-950/80 border border-rose-500/80 text-rose-200 text-xs flex items-center gap-2">
+          <div className="w-full max-w-xl p-3.5 rounded-xl bg-rose-950/80 border border-rose-500/80 text-rose-200 text-xs flex items-center gap-2">
             <ShieldAlert className="w-4 h-4 text-rose-400 shrink-0" />
             <span>{error}</span>
           </div>
         )}
 
-        {/* Lobby Players Status Banner */}
-        <div className="w-full max-w-xl mb-6 bg-slate-900 border border-amber-500/30 rounded-2xl p-4 shadow-xl">
-          <div className="flex items-center justify-between border-b border-slate-800 pb-3 mb-3">
-            <div className="flex items-center gap-2 text-xs font-bold text-amber-300 uppercase tracking-wider">
-              <Users className="w-4 h-4 text-amber-400" />
-              <span>
-                {t.connectedPlayers} ({playersList.length}/2)
-              </span>
-            </div>
-
-            {/* REAL VERIFIED CONNECTION INDICATOR */}
+        {/* Reconnecting Alert Banner */}
+        {connectionState === "RECONNECTING" && (
+          <div className="w-full max-w-xl p-3 rounded-xl bg-amber-950/90 border border-amber-500/80 text-amber-200 text-xs flex items-center justify-between shadow-lg animate-pulse">
             <div className="flex items-center gap-2">
-              <div className="relative flex items-center justify-center">
-                {connIndicator.pingClass && (
-                  <span className={`absolute w-3 h-3 rounded-full opacity-75 ${connIndicator.pingClass}`} />
-                )}
-                <span className={`relative w-2.5 h-2.5 rounded-full ${connIndicator.dotClass}`} />
-              </div>
-              <span className={`text-xs font-semibold ${connIndicator.textClass}`}>
-                {connIndicator.label}
+              <span className="w-2.5 h-2.5 rounded-full bg-amber-400 animate-ping" />
+              <span>
+                {lang === "ne"
+                  ? "सर्भरसँग पुनः सम्पर्क जोडिँदैछ..."
+                  : "Connection lost. Reconnecting to game server..."}
               </span>
-              {latency !== null && isConnected && (
-                <span className="text-[10px] text-slate-400 font-mono ml-1">
-                  ({latency}ms)
-                </span>
-              )}
             </div>
+            <span className="text-[10px] text-amber-300 font-mono">RECONNECTING</span>
           </div>
+        )}
 
-          <div className="grid grid-cols-2 gap-3">
-            {/* Player 1 (You) */}
-            <div className="p-3 bg-slate-950/60 rounded-xl border border-slate-800 flex flex-col gap-2">
-              <div className="flex items-center justify-between gap-1">
-                <div className="flex items-center gap-1.5 min-w-0">
-                  <span className="text-xs text-slate-200 font-bold truncate">
-                    {myPlayer?.name || playerName} (You)
-                  </span>
-                </div>
-                {isLeader ? (
-                  <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[9px] font-bold bg-amber-500/20 text-amber-300 border border-amber-500/50 shrink-0">
-                    <Crown className="w-3 h-3 text-amber-400" />
-                    <span>{t.roomLeader}</span>
-                  </span>
-                ) : (
-                  <span className="px-1.5 py-0.5 rounded text-[9px] font-semibold bg-slate-800 text-slate-400 border border-slate-700 shrink-0">
-                    {t.playerRole}
-                  </span>
-                )}
+        {/* Opponent Disconnected Countdown Banner (During Playing) */}
+        {isGamePhase && disconnectSecLeft !== null && disconnectSecLeft > 0 && !isFinished && (
+          <div className="w-full max-w-xl p-3 rounded-xl bg-rose-950/90 border border-rose-500/80 text-rose-200 text-xs flex items-center justify-between shadow-lg">
+            <div className="flex items-center gap-2">
+              <span className="w-2.5 h-2.5 rounded-full bg-rose-400 animate-ping" />
+              <span>
+                {lang === "ne"
+                  ? `विपक्षी सम्पर्कविहीन! ${disconnectSecLeft} सेकेन्डमा खेल स्वतः जितिनेछ।`
+                  : `Opponent disconnected! Forfeiting match in ${disconnectSecLeft}s if not reconnected.`}
+              </span>
+            </div>
+            <span className="font-mono font-bold text-sm text-rose-300">
+              {disconnectSecLeft}s
+            </span>
+          </div>
+        )}
+
+        {/* ---------------- PHASE 1 & 2: LOBBY & PREPARATION HEADER BANNER ---------------- */}
+        {!isGamePhase && (
+          <div className="w-full max-w-xl mb-2 bg-slate-900 border border-amber-500/30 rounded-2xl p-4 shadow-xl">
+            <div className="flex items-center justify-between border-b border-slate-800 pb-3 mb-3">
+              <div className="flex items-center gap-2 text-xs font-bold text-amber-300 uppercase tracking-wider">
+                <Users className="w-4 h-4 text-amber-400" />
+                <span>
+                  {t.connectedPlayers} ({playersList.length}/2)
+                </span>
               </div>
 
-              <div className="flex items-center justify-between">
-                <span className="text-[10px] text-slate-400">
-                  {isConnected ? t.connected : t.disconnected}
+              {/* REAL VERIFIED CONNECTION INDICATOR */}
+              <div className="flex items-center gap-2">
+                <div className="relative flex items-center justify-center">
+                  {connIndicator.pingClass && (
+                    <span className={`absolute w-3 h-3 rounded-full opacity-75 ${connIndicator.pingClass}`} />
+                  )}
+                  <span className={`relative w-2.5 h-2.5 rounded-full ${connIndicator.dotClass}`} />
+                </div>
+                <span className={`text-xs font-semibold ${connIndicator.textClass}`}>
+                  {connIndicator.label}
                 </span>
-                <span
-                  className={`px-2 py-0.5 rounded text-[10px] font-bold ${
-                    isMyReady
-                      ? "bg-emerald-500/20 text-emerald-400 border border-emerald-500/40"
-                      : "bg-amber-500/20 text-amber-400 border border-amber-500/40"
-                  }`}
-                >
-                  {isMyReady ? t.ready : t.notReady}
-                </span>
+                {latency !== null && isConnected && (
+                  <span className="text-[10px] text-slate-400 font-mono ml-1">
+                    ({latency}ms)
+                  </span>
+                )}
               </div>
             </div>
 
-            {/* Player 2 (Opponent) */}
-            <div className="p-3 bg-slate-950/60 rounded-xl border border-slate-800 flex flex-col gap-2">
-              <div className="flex items-center justify-between gap-1">
-                <div className="flex items-center gap-1.5 min-w-0">
-                  <span className="text-xs text-slate-200 font-bold truncate">
-                    {opponent ? opponent.name : t.player2}
+            <div className="grid grid-cols-2 gap-3">
+              {/* Player 1 (You) */}
+              <div className="p-3 bg-slate-950/60 rounded-xl border border-slate-800 flex flex-col gap-2">
+                <div className="flex items-center justify-between gap-1">
+                  <div className="flex items-center gap-1.5 min-w-0">
+                    <span className="text-xs text-slate-200 font-bold truncate">
+                      {myPlayer?.name || playerName} (You)
+                    </span>
+                  </div>
+                  {isLeader ? (
+                    <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[9px] font-bold bg-amber-500/20 text-amber-300 border border-amber-500/50 shrink-0">
+                      <Crown className="w-3 h-3 text-amber-400" />
+                      <span>{t.roomLeader}</span>
+                    </span>
+                  ) : (
+                    <span className="px-1.5 py-0.5 rounded text-[9px] font-semibold bg-slate-800 text-slate-400 border border-slate-700 shrink-0">
+                      {t.playerRole}
+                    </span>
+                  )}
+                </div>
+
+                <div className="flex items-center justify-between">
+                  <span className="text-[10px] text-slate-400">
+                    {isConnected ? t.connected : connectionState === "FAILED" ? t.connFailed : t.connConnecting}
+                  </span>
+                  <span
+                    className={`px-2 py-0.5 rounded text-[10px] font-bold ${
+                      isMyReady
+                        ? "bg-emerald-500/20 text-emerald-400 border border-emerald-500/40"
+                        : "bg-amber-500/20 text-amber-400 border border-amber-500/40"
+                    }`}
+                  >
+                    {isMyReady ? t.ready : t.notReady}
                   </span>
                 </div>
-                {opponent && (
-                  <>
-                    {opponent.is_leader ? (
-                      <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[9px] font-bold bg-amber-500/20 text-amber-300 border border-amber-500/50 shrink-0">
-                        <Crown className="w-3 h-3 text-amber-400" />
-                        <span>{t.roomLeader}</span>
-                      </span>
-                    ) : (
-                      <span className="px-1.5 py-0.5 rounded text-[9px] font-semibold bg-slate-800 text-slate-400 border border-slate-700 shrink-0">
-                        {t.playerRole}
-                      </span>
-                    )}
-                  </>
-                )}
               </div>
 
-              <div className="flex items-center justify-between">
-                {opponent ? (
-                  <>
-                    <div className="flex items-center gap-1.5">
-                      <span
-                        className={`w-2 h-2 rounded-full ${
-                          peerConnected ? "bg-emerald-400" : "bg-amber-400 animate-pulse"
-                        }`}
-                      />
-                      <span className="text-[10px] text-slate-400">
-                        {peerConnected ? t.connected : t.disconnected}
-                      </span>
-                    </div>
-
-                    <div className="flex items-center gap-2">
-                      <span
-                        className={`px-2 py-0.5 rounded text-[10px] font-bold ${
-                          opponent.ready
-                            ? "bg-emerald-500/20 text-emerald-400 border border-emerald-500/40"
-                            : "bg-amber-500/20 text-amber-400 border border-amber-500/40"
-                        }`}
-                      >
-                        {opponent.ready ? t.ready : t.notReady}
-                      </span>
-
-                      {/* Room Leader Authority: Kick Player Button */}
-                      {isLeader && (
-                        <button
-                          onClick={() => setKickCandidate({ id: opponent.id, name: opponent.name })}
-                          className="p-1 rounded bg-rose-950/60 hover:bg-rose-900/80 text-rose-300 border border-rose-600/40 transition-colors"
-                          title={t.kickPlayer}
-                        >
-                          <UserX className="w-3.5 h-3.5" />
-                        </button>
+              {/* Player 2 (Opponent) */}
+              <div className="p-3 bg-slate-950/60 rounded-xl border border-slate-800 flex flex-col gap-2">
+                <div className="flex items-center justify-between gap-1">
+                  <div className="flex items-center gap-1.5 min-w-0">
+                    <span className="text-xs text-slate-200 font-bold truncate">
+                      {opponent ? opponent.name : t.player2}
+                    </span>
+                  </div>
+                  {opponent && (
+                    <>
+                      {opponent.is_leader ? (
+                        <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[9px] font-bold bg-amber-500/20 text-amber-300 border border-amber-500/50 shrink-0">
+                          <Crown className="w-3 h-3 text-amber-400" />
+                          <span>{t.roomLeader}</span>
+                        </span>
+                      ) : (
+                        <span className="px-1.5 py-0.5 rounded text-[9px] font-semibold bg-slate-800 text-slate-400 border border-slate-700 shrink-0">
+                          {t.playerRole}
+                        </span>
                       )}
-                    </div>
-                  </>
-                ) : (
-                  <span className="text-[10px] text-amber-400/80 italic animate-pulse">
-                    {lang === "ne" ? "प्रतीक्षा..." : "Waiting..."}
-                  </span>
-                )}
+                    </>
+                  )}
+                </div>
+
+                <div className="flex items-center justify-between">
+                  {opponent ? (
+                    <>
+                      <div className="flex items-center gap-1.5">
+                        <span
+                          className={`w-2 h-2 rounded-full ${
+                            peerConnected ? "bg-emerald-400" : "bg-amber-400 animate-pulse"
+                          }`}
+                        />
+                        <span className="text-[10px] text-slate-400">
+                          {peerConnected ? t.connected : t.waitingForPlayerConnection}
+                        </span>
+                      </div>
+
+                      <div className="flex items-center gap-2">
+                        <span
+                          className={`px-2 py-0.5 rounded text-[10px] font-bold ${
+                            opponent.ready
+                              ? "bg-emerald-500/20 text-emerald-400 border border-emerald-500/40"
+                              : "bg-amber-500/20 text-amber-400 border border-amber-500/40"
+                          }`}
+                        >
+                          {opponent.ready ? t.ready : t.notReady}
+                        </span>
+
+                        {/* Room Leader Authority: Kick Player Button */}
+                        {isLeader && (
+                          <button
+                            onClick={() => setKickCandidate({ id: opponent.id, name: opponent.name })}
+                            className="p-1 rounded bg-rose-950/60 hover:bg-rose-900/80 text-rose-300 border border-rose-600/40 transition-colors"
+                            title={t.kickPlayer}
+                          >
+                            <UserX className="w-3.5 h-3.5" />
+                          </button>
+                        )}
+                      </div>
+                    </>
+                  ) : (
+                    <span className="text-[10px] text-amber-400/80 italic animate-pulse">
+                      {lang === "ne" ? "प्रतीक्षा..." : "Waiting..."}
+                    </span>
+                  )}
+                </div>
               </div>
             </div>
+
+            {/* Room Leader Manual Start Button if both connected */}
+            {isLeader && opponent && (gameState?.status === "PREPARING" || gameState?.status === "WAITING") && (
+              <div className="mt-3 pt-3 border-t border-slate-800 flex items-center justify-between">
+                <span className="text-[11px] text-slate-400">
+                  {bothConnected
+                    ? lang === "ne"
+                      ? "दुबै खेलाडी सम्पर्कमा छन्। खेल तुरुन्त सुरु गर्न सक्नुहुन्छ।"
+                      : "Both players connected. You may launch the game immediately."
+                    : t.waitingForPlayerConnection}
+                </span>
+                <button
+                  onClick={startGame}
+                  disabled={!bothConnected}
+                  className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold bg-gradient-to-r from-amber-500 to-amber-600 hover:from-amber-400 hover:to-amber-500 text-slate-950 disabled:opacity-40 disabled:cursor-not-allowed shadow transition-all"
+                >
+                  <Play className="w-3.5 h-3.5 fill-current" />
+                  <span>{t.startMatchNow}</span>
+                </button>
+              </div>
+            )}
           </div>
+        )}
 
-          {/* Room Leader Manual Start Button if both connected */}
-          {isLeader && opponent && (gameState?.status === "PREPARING" || gameState?.status === "WAITING") && (
-            <div className="mt-3 pt-3 border-t border-slate-800 flex items-center justify-between">
-              <span className="text-[11px] text-slate-400">
-                {bothConnected
-                  ? lang === "ne"
-                    ? "दुबै खेलाडी सम्पर्कमा छन्। खेल तुरुन्त सुरु गर्न सक्नुहुन्छ।"
-                    : "Both players connected. You may launch the game immediately."
-                  : lang === "ne"
-                  ? "खेलाडी पूर्ण रूपमा जोडिएपछि मात्र खेल सुरु गर्न मिल्छ।"
-                  : "Match can start once both players verify connection."}
-              </span>
-              <button
-                onClick={startGame}
-                disabled={!bothConnected}
-                className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold bg-gradient-to-r from-amber-500 to-amber-600 hover:from-amber-400 hover:to-amber-500 text-slate-950 disabled:opacity-40 disabled:cursor-not-allowed shadow transition-all"
-              >
-                <Play className="w-3.5 h-3.5 fill-current" />
-                <span>{t.startMatchNow}</span>
-              </button>
-            </div>
-          )}
-        </div>
-
-        {/* WAITING PHASE: When waiting for Player 2 to join */}
+        {/* ---------------- WAITING PHASE: When waiting for Player 2 to join ---------------- */}
         {gameState?.status === "WAITING" && (
           <div className="w-full max-w-md bg-slate-900/90 border border-amber-500/40 rounded-2xl p-6 text-center shadow-xl animate-in fade-in">
             <DhakaBorder className="mb-4" />
@@ -441,7 +528,7 @@ export default function RoomLobbyPage({ params }: PageProps) {
           </div>
         )}
 
-        {/* PREPARING PHASE: When both players joined, 60s countdown to arrange board */}
+        {/* ---------------- PREPARING PHASE: When both players joined, 60s countdown ---------------- */}
         {gameState?.status === "PREPARING" && gameState.board && (
           <div className="w-full flex flex-col items-center animate-in fade-in zoom-in-95 duration-300">
             {/* 60s Preparation Countdown Banner */}
@@ -482,7 +569,172 @@ export default function RoomLobbyPage({ params }: PageProps) {
             </p>
           </div>
         )}
+
+        {/* ---------------- PHASE 3 & 4: ACTIVE PLAYING / FINISHED GAME ---------------- */}
+        {isGamePhase && (
+          <div className="w-full flex flex-col gap-4 animate-in fade-in duration-300">
+            {/* 1. Timers and Active Turn Bar */}
+            <TimerDisplay
+              turnDeadline={gameState?.turn_deadline ?? null}
+              matchDeadline={gameState?.match_deadline ?? null}
+              isMyTurn={isMyTurn}
+              currentTurnPlayerName={currentTurnPlayer}
+              lang={lang}
+              devanagariNumerals={devanagariNumerals}
+            />
+
+            {/* 2. B I N G O Line Progress */}
+            <BingoProgress
+              completedLines={myLines}
+              opponentLines={opponentLines}
+              lang={lang}
+              devanagariNumerals={devanagariNumerals}
+              isMyTurn={isMyTurn}
+            />
+
+            {/* 3. Call Notification Banner */}
+            <GameNotificationBanner
+              lastCalledNumber={lastCalled?.number || gameState?.called_numbers?.[gameState?.called_numbers?.length - 1]}
+              lastCalledBy={lastCalled?.by}
+              isMyTurn={isMyTurn}
+              lang={lang}
+              devanagariNumerals={devanagariNumerals}
+            />
+
+            {/* 4. Responsive Layout: Main 5x5 Board & Side Panel */}
+            <div className="w-full grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
+              {/* Main 5x5 Board Area (lg:col-span-8) */}
+              <div className="lg:col-span-8 w-full flex flex-col items-center">
+                {gameState?.board ? (
+                  <Board
+                    board={gameState.board}
+                    isMyTurn={isMyTurn}
+                    onCallNumber={handleCallNumber}
+                    devanagariNumerals={devanagariNumerals}
+                    completedLines={gameState.completed_line_details}
+                  />
+                ) : (
+                  <div className="p-12 text-center text-slate-400">
+                    <NepaliMandalaBadge size={48} className="mx-auto mb-3" />
+                    <p>{lang === "ne" ? "बोर्ड लोड हुँदैछ..." : "Loading Board..."}</p>
+                  </div>
+                )}
+              </div>
+
+              {/* Side Panel: Live Opponent & Called Numbers (lg:col-span-4) */}
+              <div className="lg:col-span-4 w-full flex flex-col gap-4">
+                {/* Live Opponent & Connection Widget */}
+                <div className="bg-slate-900/90 border border-slate-800 rounded-2xl p-3.5 shadow-xl flex items-center justify-between">
+                  <div className="flex items-center gap-2 min-w-0">
+                    <div className="relative">
+                      <span
+                        className={`block w-3 h-3 rounded-full ${
+                          peerConnected ? "bg-emerald-500" : "bg-rose-500 animate-pulse"
+                        }`}
+                      />
+                      {peerConnected && (
+                        <span className="absolute inset-0 w-3 h-3 rounded-full bg-emerald-500 animate-ping opacity-75" />
+                      )}
+                    </div>
+                    <div className="min-w-0">
+                      <div className="flex items-center gap-1.5">
+                        <span className="text-xs font-bold text-slate-200 truncate">
+                          {opponent ? opponent.name : t.player2}
+                        </span>
+                        {opponent?.is_leader && (
+                          <span className="inline-flex items-center gap-0.5 px-1 py-0.2 rounded text-[8px] font-bold bg-amber-500/20 text-amber-300 border border-amber-500/50">
+                            <Crown className="w-2.5 h-2.5 text-amber-400" />
+                            <span>{t.roomLeader}</span>
+                          </span>
+                        )}
+                      </div>
+                      <span className="text-[10px] text-slate-400 block -mt-0.5">
+                        {peerConnected
+                          ? t.connected
+                          : disconnectSecLeft !== null
+                          ? `${t.disconnected} (${disconnectSecLeft}s)`
+                          : t.disconnected}
+                      </span>
+                    </div>
+                  </div>
+
+                  {latency !== null && isConnected && (
+                    <div className="flex items-center gap-1 text-[10px] font-mono text-slate-400 bg-slate-950/80 px-2 py-1 rounded-lg border border-slate-800">
+                      <Activity className="w-3 h-3 text-amber-400" />
+                      <span>{latency}ms</span>
+                    </div>
+                  )}
+                </div>
+
+                {/* Called Numbers History */}
+                <div className="bg-slate-900/90 border border-amber-500/30 rounded-2xl p-4 shadow-xl">
+                  <div className="flex items-center justify-between border-b border-slate-800 pb-2.5 mb-3">
+                    <div className="flex items-center gap-2 text-xs font-bold text-amber-300 uppercase tracking-wider">
+                      <History className="w-4 h-4 text-amber-400" />
+                      <span>{t.gameHistory}</span>
+                    </div>
+                    <span className="font-mono text-xs text-slate-400">
+                      {formatNum(gameState?.called_numbers?.length || 0)} / {formatNum(25)}
+                    </span>
+                  </div>
+
+                  {gameState?.called_numbers && gameState.called_numbers.length > 0 ? (
+                    <div className="flex flex-wrap gap-1.5 max-h-48 overflow-y-auto p-1">
+                      {gameState.called_numbers.map((num, idx) => {
+                        const isLatest = idx === gameState.called_numbers.length - 1;
+                        return (
+                          <span
+                            key={num}
+                            className={`inline-flex items-center justify-center w-8 h-8 rounded-lg text-xs font-bold transition-all shadow-sm ${
+                              isLatest
+                                ? "bg-rose-600 text-white border-2 border-amber-300 ring-2 ring-rose-500/50 scale-110 font-extrabold animate-bounce-short"
+                                : "bg-slate-800 text-amber-200 border border-slate-700"
+                            }`}
+                          >
+                            {formatNum(num)}
+                          </span>
+                        );
+                      })}
+                    </div>
+                  ) : (
+                    <p className="text-xs text-slate-400 italic text-center py-4">
+                      {lang === "ne" ? "कुनै अंक बोलाइएको छैन" : "No numbers called yet"}
+                    </p>
+                  )}
+                </div>
+
+                {/* Quick Strategic Tips */}
+                <div className="bg-slate-900/70 border border-slate-800 rounded-2xl p-4 text-xs text-slate-300 space-y-2">
+                  <span className="text-[11px] font-bold text-amber-400 uppercase tracking-wider block">
+                    {lang === "ne" ? "खेल सुझाव" : "Tactical Hint"}
+                  </span>
+                  <p>
+                    {lang === "ne"
+                      ? "तपाईंले बोलाएको अंक विपक्षीको बोर्डमा पनि काटिन्छ। त्यसैले आफ्नो लाइन छिटो बनाउने अंक छान्नुहोस्!"
+                      : "Every number you call is marked on your opponent's board as well. Choose numbers that complete your rows, columns, or diagonals faster!"}
+                  </p>
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
       </main>
+
+      {/* Game Over Modal with Rematch Coordination */}
+      <GameModal
+        isOpen={isFinished}
+        result={gameState?.result ?? null}
+        resultReason={gameState?.result_reason ?? null}
+        isWinner={isWinner}
+        isDraw={isDraw}
+        myLines={myLines}
+        opponentLines={opponentLines}
+        rematchRequested={rematchRequested}
+        onRequestRematch={requestRematch}
+        onExit={handleExit}
+        lang={lang}
+        devanagariNumerals={devanagariNumerals}
+      />
 
       {/* Kick Player Confirmation Modal (Leader only) */}
       {kickCandidate && (
@@ -536,4 +788,3 @@ export default function RoomLobbyPage({ params }: PageProps) {
     </div>
   );
 }
-

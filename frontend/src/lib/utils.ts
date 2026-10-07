@@ -39,6 +39,23 @@ export function setStoredPlayerName(name: string) {
   }
 }
 
+export function getOrCreateSessionId(playerId: string): string {
+  if (typeof window === "undefined") {
+    return `s_${playerId}_${Date.now().toString(36)}`;
+  }
+  const key = `nepali_bingo_session_${playerId}`;
+  let sid = sessionStorage.getItem(key);
+  if (!sid) {
+    const rand =
+      typeof crypto !== "undefined" && "randomUUID" in crypto
+        ? crypto.randomUUID()
+        : `${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`;
+    sid = `s_${playerId}_${rand}`;
+    sessionStorage.setItem(key, sid);
+  }
+  return sid;
+}
+
 export function cn(...classes: (string | boolean | undefined | null)[]): string {
   return classes.filter(Boolean).join(" ");
 }
@@ -62,19 +79,22 @@ export async function copyToClipboard(text: string): Promise<boolean> {
     try {
       const textArea = document.createElement("textarea");
       textArea.value = cleanText;
+      textArea.setAttribute("readonly", "");
+      textArea.setAttribute("aria-hidden", "true");
       textArea.style.position = "fixed";
       textArea.style.top = "0";
       textArea.style.left = "0";
-      textArea.style.width = "2em";
-      textArea.style.height = "2em";
+      textArea.style.width = "1px";
+      textArea.style.height = "1px";
       textArea.style.padding = "0";
       textArea.style.border = "none";
       textArea.style.outline = "none";
       textArea.style.boxShadow = "none";
-      textArea.style.background = "transparent";
+      textArea.style.opacity = "0";
       document.body.appendChild(textArea);
       textArea.focus();
       textArea.select();
+      textArea.setSelectionRange(0, cleanText.length);
       const successful = document.execCommand("copy");
       document.body.removeChild(textArea);
       if (successful) return true;

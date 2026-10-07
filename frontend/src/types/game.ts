@@ -1,4 +1,4 @@
-export type RoomStatus = "WAITING" | "PREPARING" | "PLAYING" | "FINISHED";
+export type RoomStatus = "WAITING" | "PREPARING" | "STARTING" | "PLAYING" | "FINISHED";
 
 export interface CellData {
   number: number;
@@ -42,6 +42,7 @@ export interface GameState {
   creator_id: string;
   leader_id: string;
   is_leader: boolean;
+  game_session_id?: string | null;
   players: Record<string, PlayerInfo>;
   player_order: string[];
   current_turn: string | null;
@@ -63,6 +64,20 @@ export interface GameState {
   peer_connection_state: ConnectionState;
   both_connected: boolean;
   completed_line_details: LineDetail[];
+  connection_diagnostics?: {
+    room_id: string;
+    player_id: string;
+    session_id?: string | null;
+    connection_id?: string | null;
+    role: string;
+    signaling: string;
+    transport: string;
+    handshake: string;
+    heartbeat: string;
+    last_ping_ms?: number | null;
+    peer_connected: boolean;
+    game_session_id?: string | null;
+  };
 }
 
 export interface WebSocketMessage {

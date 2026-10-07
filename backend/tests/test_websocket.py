@@ -3,7 +3,7 @@ import asyncio
 import json
 from httpx import AsyncClient, ASGITransport
 from app.main import app
-from app.services.room_service import room_service
+from app.services.room_service import room_service, force_verified
 
 @pytest.mark.asyncio
 async def test_full_game_lifecycle_end_to_end():
@@ -39,6 +39,7 @@ async def test_full_game_lifecycle_end_to_end():
         assert join_resp.status_code == 200
         assert room.status == "PREPARING"
         assert room.preparation_deadline is not None
+        force_verified(room)
 
         # 3. Swap cells during preparation
         b1_before = room.boards[p1_id][0][0]

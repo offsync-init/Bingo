@@ -1,7 +1,7 @@
 import pytest
 import asyncio
 import time
-from app.services.room_service import RoomService, GameRoom
+from app.services.room_service import RoomService, GameRoom, force_verified
 from app.game.engine import TARGET_LINES_FOR_BINGO
 
 @pytest.mark.asyncio
@@ -35,6 +35,7 @@ async def test_ready_starts_game_and_p1_starts():
     p2_id = "user_2"
     room = await service.create_room(p1_id, "Player 1")
     await service.join_room(room.room_id, p2_id, "Player 2")
+    force_verified(room)
 
     assert room.status == "PREPARING"
 
@@ -58,6 +59,7 @@ async def test_move_turns_and_marks():
     p2 = "user_2"
     room = await service.create_room(p1, "Player 1")
     await service.join_room(room.room_id, p2, "Player 2")
+    force_verified(room)
     await service.set_player_ready(room, p1, True)
     await service.set_player_ready(room, p2, True)
 
@@ -90,6 +92,7 @@ async def test_turn_timeout_loses_immediately():
     p2 = "user_2"
     room = await service.create_room(p1, "Player 1")
     await service.join_room(room.room_id, p2, "Player 2")
+    force_verified(room)
     await service.set_player_ready(room, p1, True)
     await service.set_player_ready(room, p2, True)
 
@@ -112,6 +115,7 @@ async def test_match_timeout_resolution():
     p2 = "user_2"
     room = await service.create_room(p1, "Player 1")
     await service.join_room(room.room_id, p2, "Player 2")
+    force_verified(room)
     await service.set_player_ready(room, p1, True)
     await service.set_player_ready(room, p2, True)
 
@@ -170,6 +174,7 @@ async def test_simultaneous_bingo_turn_player_wins():
     p2 = "user_2"
     room = await service.create_room(p1, "Player 1")
     await service.join_room(room.room_id, p2, "Player 2")
+    force_verified(room)
     await service.set_player_ready(room, p1, True)
     await service.set_player_ready(room, p2, True)
 
@@ -208,6 +213,7 @@ async def test_rematch_flow():
     p2 = "user_2"
     room = await service.create_room(p1, "Player 1")
     await service.join_room(room.room_id, p2, "Player 2")
+    force_verified(room)
     await service.set_player_ready(room, p1, True)
     await service.set_player_ready(room, p2, True)
 
@@ -237,6 +243,7 @@ async def test_disconnect_forfeit_grace_period():
     p2 = "user_2"
     room = await service.create_room(p1, "Player 1")
     await service.join_room(room.room_id, p2, "Player 2")
+    force_verified(room)
     await service.set_player_ready(room, p1, True)
     await service.set_player_ready(room, p2, True)
 
@@ -353,10 +360,51 @@ async def test_start_game_by_leader_validation():
     assert ok is False
     assert "Both players must be actively connected" in err
 
-    # Mark both connected -> start succeeds!
-    room.players[p1]["connected"] = True
-    room.players[p2]["connected"] = True
+    force_verified(room)
     ok, err = await service.start_game_by_leader(room, p1)
     assert ok is True
     assert room.status == "PLAYING"
     assert room.current_turn == p1
+
+
+@pytest.mark.asyncio
+async def test_ready_without_verified_connection_does_not_start():
+    service = RoomService()
+    p1 = "user_1"
+    p2 = "user_2"
+    room = await service.create_room(p1, "Player 1")
+    await service.join_room(room.room_id, p2, "Player 2")
+    await service.set_player_ready(room, p1, True)
+    await service.set_player_ready(room, p2, True)
+    assert room.status == "PREPARING"
+
+
+@pytest.mark.asyncio
+async def test_concurrent_joins_never_exceed_two_players():
+    service = RoomService()
+    room = await service.create_room("host", "Host")
+
+    async def join(pid: str):
+        return await service.join_room(room.room_id, pid, pid)
+
+    results = await asyncio.gather(join("a"), join("b"), join("c"), join("d"))
+    successes = [r for r in results if r[0]]
+    assert len(successes) == 1  # host already occupies one slot; only one extra join
+    assert len(room.players) == 2
+
+
+@pytest.mark.asyncio
+async def test_duplicate_start_keeps_same_session():
+    service = RoomService()
+    p1 = "leader_1"
+    p2 = "player_2"
+    room = await service.create_room(p1, "Leader")
+    await service.join_room(room.room_id, p2, "Guest")
+    force_verified(room)
+    ok, err = await service.start_game_by_leader(room, p1)
+    assert ok is True
+    session = room.game_session_id
+    ok2, err2 = await service.start_game_by_leader(room, p1)
+    assert ok2 is True
+    assert room.game_session_id == session
+    assert room.status == "PLAYING"

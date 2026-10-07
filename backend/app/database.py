@@ -3,7 +3,7 @@ from datetime import datetime, timezone
 from typing import Optional, Dict, Any
 from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, AsyncSession
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
-from sqlalchemy import String, Text, DateTime
+from sqlalchemy import String, Text, DateTime, text
 
 import os
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite+aiosqlite:///./bingo.db")
@@ -39,8 +39,10 @@ class RoomRecord(Base):
     winner: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
     result: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
     result_reason: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    game_session_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    kicked_ids_data: Mapped[str] = mapped_column(Text, default="[]")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc))
-from sqlalchemy import String, Text, DateTime, text
+
 
 _db_initialized = False
 
@@ -50,6 +52,14 @@ async def init_db():
         await conn.run_sync(Base.metadata.create_all)
         try:
             await conn.execute(text("ALTER TABLE rooms ADD COLUMN leader_id VARCHAR(64)"))
+        except Exception:
+            pass
+        try:
+            await conn.execute(text("ALTER TABLE rooms ADD COLUMN game_session_id VARCHAR(64)"))
+        except Exception:
+            pass
+        try:
+            await conn.execute(text("ALTER TABLE rooms ADD COLUMN kicked_ids_data TEXT DEFAULT '[]'"))
         except Exception:
             pass
     _db_initialized = True
@@ -86,7 +96,8 @@ async def save_room_state(room_dict: Dict[str, Any]):
                 record.winner = room_dict.get("winner")
                 record.result = room_dict.get("result")
                 record.result_reason = room_dict.get("result_reason")
-                record.updated_at = datetime.now(timezone.utc)
+                record.game_session_id = room_dict.get("game_session_id")
+                record.kicked_ids_data = json.dumps(room_dict.get("kicked_ids", []))
     except Exception as e:
         import logging
         logging.getLogger("bingo.db").error(f"Failed to save room state for {room_dict.get('room_id')}: {e}")
@@ -114,4 +125,6 @@ async def load_room_state(room_id: str) -> Optional[Dict[str, Any]]:
             "winner": record.winner,
             "result": record.result,
             "result_reason": record.result_reason,
+            "game_session_id": getattr(record, "game_session_id", None),
+            "kicked_ids": json.loads(getattr(record, "kicked_ids_data", None) or "[]"),
         }
